@@ -37,6 +37,7 @@ import {
   DELIVERY_SOFT_DELETE_STATUSES,
   type DeliveryPurpose,
   type DocumentRecipient,
+  type EdoDocumentRecipient,
   type PrimarySourceDocument,
   type OperationSourceDocument,
 } from '@matcheck/contracts';
@@ -49,6 +50,8 @@ import {
   deliveryItems,
   deliveryPhotos,
   deliverySources,
+  edoAccounts,
+  edoExportDocuments,
   responsiblePersons,
   entityDeletions,
   s3CleanupOutbox,
@@ -452,6 +455,74 @@ async function loadDocumentRecipients(
   return byDelivery;
 }
 
+/**
+ * Свободные УПД из ЭДО (связь без блока скана) — документы режима «Разные
+ * получатели» наравне с delivery_sources (0152). Все, а не только со своими
+ * настройками: по ним считается порог тумблера и рисуются блоки. Подпись —
+ * из реестра ЭДО, у старого пути (импортированная карточка) — из документа.
+ */
+async function loadFreeEdoDocuments(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: any,
+  ids: string[],
+): Promise<Map<string, EdoDocumentRecipient[]>> {
+  const byDelivery = new Map<string, EdoDocumentRecipient[]>();
+  if (!ids.length) return byDelivery;
+  const rows = await app.db
+    .select({
+      deliveryId: deliveryEdoMatches.deliveryId,
+      matchId: deliveryEdoMatches.id,
+      operator: drSql<
+        string | null
+      >`case when ${deliveryEdoMatches.exportDocumentId} is not null then ${edoAccounts.provider} else 'diadoc' end`,
+      docNumber: drSql<
+        string | null
+      >`coalesce(${edoExportDocuments.documentNumber}, ${sourceDocuments.docNumber})`,
+      docDate: drSql<
+        string | null
+      >`coalesce(to_char(${edoExportDocuments.documentDate}, 'YYYY-MM-DD'), to_char(${sourceDocuments.docDate}, 'YYYY-MM-DD'))`,
+      ownRecipient: deliveryEdoMatches.ownRecipient,
+      contractorId: deliveryEdoMatches.contractorId,
+      contractorName: counterparties.name,
+      recipientMolId: deliveryEdoMatches.recipientMolId,
+      recipientMolName: responsiblePersons.fullName,
+      ownPurpose: deliveryEdoMatches.ownPurpose,
+      purpose: deliveryEdoMatches.purpose,
+    })
+    .from(deliveryEdoMatches)
+    .leftJoin(edoExportDocuments, eq(edoExportDocuments.id, deliveryEdoMatches.exportDocumentId))
+    .leftJoin(edoAccounts, eq(edoAccounts.id, edoExportDocuments.edoAccountId))
+    .leftJoin(sourceDocuments, eq(sourceDocuments.id, deliveryEdoMatches.sourceDocumentId))
+    .leftJoin(counterparties, eq(deliveryEdoMatches.contractorId, counterparties.id))
+    .leftJoin(responsiblePersons, eq(deliveryEdoMatches.recipientMolId, responsiblePersons.id))
+    .where(
+      and(
+        inArray(deliveryEdoMatches.deliveryId, ids),
+        isNull(deliveryEdoMatches.sectionDocumentId),
+      ),
+    )
+    // Порядок привязки — как блоки ЭДО в карточке.
+    .orderBy(deliveryEdoMatches.deliveryId, deliveryEdoMatches.linkedAt, deliveryEdoMatches.id);
+  for (const row of rows) {
+    const list = byDelivery.get(row.deliveryId) ?? [];
+    list.push({
+      matchId: row.matchId,
+      operator: row.operator,
+      docNumber: row.docNumber,
+      docDate: row.docDate,
+      ownRecipient: row.ownRecipient,
+      contractorId: row.contractorId,
+      contractorName: row.contractorName,
+      recipientMolId: row.recipientMolId,
+      recipientMolName: row.recipientMolName,
+      ownPurpose: row.ownPurpose,
+      purpose: DeliveryPurposeSchema.nullable().parse(row.purpose),
+    });
+    byDelivery.set(row.deliveryId, list);
+  }
+  return byDelivery;
+}
+
 // Чистая сборка DTO из уже полученных данных — ЕДИНСТВЕННЫЙ источник формы
 // ответа (общий для одиночного и батч-пути). Форму DTO менять только здесь.
 function assembleDeliveryDto(
@@ -467,6 +538,9 @@ function assembleDeliveryDto(
   // тоже — форма ответа обязана совпадать у одиночного и батч-пути.
   sourceDocumentSummaries: OperationSourceDocument[] = [],
   documentRecipients: DocumentRecipient[] = [],
+  // Свободные УПД из ЭДО: считаются всегда (порог тумблера), список отдаётся
+  // только при включённом режиме.
+  freeEdoDocuments: EdoDocumentRecipient[] = [],
 ) {
   const d = r.d;
   const s = r.s;
@@ -532,6 +606,8 @@ function assembleDeliveryDto(
     purpose: DeliveryPurposeSchema.nullable().parse(d.purpose),
     recipientsPerDocument: d.recipientsPerDocument,
     documentRecipients,
+    recipientDocumentCount: sources.length + freeEdoDocuments.length,
+    ...(d.recipientsPerDocument ? { edoDocuments: freeEdoDocuments } : {}),
     confirmedByMolUserId: d.confirmedByMolUserId,
     confirmedByMolUserEmail: r.molEmail,
     confirmedByMolAt: d.confirmedByMolAt?.toISOString() ?? null,
@@ -625,6 +701,7 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
   const itemCounts = await loadDocumentItemCounts(app.db, mentionedIds);
   const coveredCounts = countCoveredDocumentItems(items);
   const documentRecipients = await loadDocumentRecipients(app, [id]);
+  const freeEdoDocuments = await loadFreeEdoDocuments(app, [id]);
 
   return assembleDeliveryDto(
     r,
@@ -643,6 +720,7 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
       operationClosed: r.s.code === 'confirmed_mol',
     }),
     documentRecipients.get(id) ?? [],
+    freeEdoDocuments.get(id) ?? [],
   );
 }
 
@@ -677,6 +755,7 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
     .where(inArray(deliverySources.deliveryId, ids))
     .orderBy(deliverySources.deliveryId, deliverySources.sourceDocumentId);
   const documentRecipients = await loadDocumentRecipients(app, ids);
+  const freeEdoDocuments = await loadFreeEdoDocuments(app, ids);
 
   const headerById = new Map<string, DeliveryHeaderRow>();
   for (const r of headerRows) headerById.set(r.d.id, r);
@@ -852,6 +931,7 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
           operationClosed: r.s.code === 'confirmed_mol',
         }),
         documentRecipients.get(id) ?? [],
+        freeEdoDocuments.get(id) ?? [],
       ),
     );
   }

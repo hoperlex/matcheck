@@ -24,6 +24,7 @@ import { integrationTokenRoutes } from '../../src/routes/integration-token.js';
 import { integrationOnecRoutes } from '../../src/routes/integration-onec.js';
 import { hashClientSecret } from '../../src/domain/auth/service-accounts.js';
 import { signAccessToken } from '../../src/domain/auth/jwt.js';
+import { HASH_VERSION } from '../../src/domain/onec/content-hash.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
@@ -417,6 +418,21 @@ suite('выгрузка приёмок в 1С', () => {
       expect(reasonOf(await queue(tok), id)).toBe('changed');
     });
 
+    it('свой признак УПД из ЭДО без блока (0152) → changed и в edo[] приёмки', async () => {
+      const tok = await token();
+      const { id } = await confirmedWithDoc();
+      const { matchId } = await edo(id, null, Buffer.from('<?xml version="1.0"?><Файл/>'));
+      await ackCurrent(tok, id);
+      const before = await one(tok, id);
+      expect(before.edo[0]).toMatchObject({ matchId, purpose: 'own_forces', recipient: { kind: 'none' }, contract: null });
+      await sql`UPDATE deliveries SET recipients_per_document = true WHERE id = ${id}`;
+      await sql`UPDATE delivery_edo_matches SET own_purpose = true, purpose = 'tolling_act' WHERE id = ${matchId}`;
+      expect(reasonOf(await queue(tok), id)).toBe('changed');
+      const after = await one(tok, id);
+      expect(after.edo[0]).toMatchObject({ matchId, purpose: 'tolling_act' });
+      expect(after.contentHash).not.toBe(before.contentHash);
+    });
+
     it('повтор подтверждения не сдвигает окно', async () => {
       const tok = await token();
       const { id } = await confirmedWithDoc();
@@ -424,7 +440,7 @@ suite('выгрузка приёмок в 1С', () => {
       await sql`UPDATE delivery_onec_exports SET exported_at = exported_at - interval '3 days' WHERE delivery_id = ${id}`;
       const [before] = await sql<{ exported_at: string; ack_count: number }[]>`
         SELECT exported_at::text, ack_count FROM delivery_onec_exports WHERE delivery_id = ${id}`;
-      await ackItems(tok, [{ id, contentHash: h, hashVersion: 1 }]);
+      await ackItems(tok, [{ id, contentHash: h, hashVersion: HASH_VERSION }]);
       const [after] = await sql<{ exported_at: string; ack_count: number }[]>`
         SELECT exported_at::text, ack_count FROM delivery_onec_exports WHERE delivery_id = ${id}`;
       expect(after!.exported_at).toBe(before!.exported_at);
@@ -454,15 +470,15 @@ suite('выгрузка приёмок в 1С', () => {
       await sql`UPDATE delivery_items SET price = 150 WHERE delivery_id = ${id}`;
       expect(reasonOf(await queue(tok), id)).toBe('changed');
       // Старое подтверждение H, пока содержимое C: пометка остаётся.
-      await ackItems(tok, [{ id, contentHash: h, hashVersion: 1 }]);
+      await ackItems(tok, [{ id, contentHash: h, hashVersion: HASH_VERSION }]);
       expect(reasonOf(await queue(tok), id)).toBe('changed');
       // Откат без прохода, 1С загрузила H и подтвердила — это повтор.
       await sql`UPDATE delivery_items SET price = 100 WHERE delivery_id = ${id}`;
-      await ackItems(tok, [{ id, contentHash: h, hashVersion: 1 }]);
+      await ackItems(tok, [{ id, contentHash: h, hashVersion: HASH_VERSION }]);
       const q = await queue(tok);
       expect(reasonOf(q, id)).toBe('changed');
       expect(q.items.find((i) => i.id === id)!.detectedHash).toBe(h);
-      await ackItems(tok, [{ id, contentHash: h, hashVersion: 1 }]);
+      await ackItems(tok, [{ id, contentHash: h, hashVersion: HASH_VERSION }]);
       expect(reasonOf(await queue(tok), id)).toBeNull();
     });
 
@@ -514,7 +530,7 @@ suite('выгрузка приёмок в 1С', () => {
       await sql`UPDATE deliveries SET pending_deletion_at = NULL, pending_deletion_by_user_id = NULL WHERE id = ${id}`;
       const q = await queue(tok);
       expect(q.items.find((i) => i.id === id)).toMatchObject({ reason: 'changed', detectedHash: h });
-      await ackItems(tok, [{ id, contentHash: h, hashVersion: 1 }]);
+      await ackItems(tok, [{ id, contentHash: h, hashVersion: HASH_VERSION }]);
       expect(reasonOf(await queue(tok), id)).toBeNull();
     });
 
@@ -648,7 +664,7 @@ suite('выгрузка приёмок в 1С', () => {
         { id: randomUUID(), deleted: true },
         { id, contentHash: 'xyz', hashVersion: 1 },
         { id, contentHash: d.contentHash, hashVersion: 99 },
-        { id, contentHash: d.contentHash, hashVersion: 1 },
+        { id, contentHash: d.contentHash, hashVersion: HASH_VERSION },
       ]);
       expect(res.statusCode).toBe(200);
       expect(res.json().results.map((r: { result: string }) => r.result)).toEqual([

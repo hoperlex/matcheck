@@ -7,6 +7,12 @@
 // областью: без неё отвязка общего договора снесла бы договоры документов.
 // deliveries не меняется — мобильный клиент и upsert приёмки связь не видят.
 //
+// Третья область (0152) — договор УПД из ЭДО без скана (свободная связь
+// delivery_edo_matches, section_document_id IS NULL). Он хранится на самой
+// строке связи (contract_id), а не в delivery_contracts: так договор не может
+// принадлежать чужой приёмке, а уникальность delivery_contracts, на которую
+// опирается ON CONFLICT, не меняется. Порядок проверок выбора тот же.
+//
 // Порядок проверок выбора (PUT) — так, чтобы повтор после потерянного ответа
 // давал 200, а чужая замена — 409:
 //   1. приёмка FOR NO KEY UPDATE (сериализует все изменения связей этой
@@ -35,7 +41,9 @@ import {
   deliveries,
   deliveryContractEvents,
   deliveryContracts,
+  deliveryEdoMatches,
   deliverySources,
+  edoExportDocuments,
   sites,
   sourceDocuments,
   supplierContracts,
@@ -86,6 +94,39 @@ export async function loadDocumentSupplierInns(
   for (const r of rows) {
     const inn = innDigits(r.inn);
     if (inn && !own.has(inn)) out.add(inn);
+  }
+  return out;
+}
+
+/**
+ * ИНН продавца свободной УПД из ЭДО приёмки: строка реестра (supplier_inn и
+ * seller_inns), у старого пути — импортированная карточка Диадока. Свои ИНН
+ * исключены. Пусто — ИНН неизвестен.
+ */
+export async function loadEdoDocumentSupplierInns(
+  db: Executor,
+  deliveryId: string,
+  edoMatchId: string,
+): Promise<Set<string>> {
+  const [rows, own] = await Promise.all([
+    db
+      .select({
+        supplierInn: edoExportDocuments.supplierInn,
+        sellerInns: edoExportDocuments.sellerInns,
+        importedInn: sourceDocuments.supplierInnRaw,
+      })
+      .from(deliveryEdoMatches)
+      .leftJoin(edoExportDocuments, eq(edoExportDocuments.id, deliveryEdoMatches.exportDocumentId))
+      .leftJoin(sourceDocuments, eq(sourceDocuments.id, deliveryEdoMatches.sourceDocumentId))
+      .where(and(eq(deliveryEdoMatches.deliveryId, deliveryId), eq(deliveryEdoMatches.id, edoMatchId))),
+    loadOwnInns(db as Db),
+  ]);
+  const out = new Set<string>();
+  for (const r of rows) {
+    for (const raw of [r.supplierInn, ...(r.sellerInns ?? []), r.importedInn]) {
+      const inn = innDigits(raw);
+      if (inn && !own.has(inn)) out.add(inn);
+    }
   }
   return out;
 }
@@ -199,14 +240,30 @@ export async function getDeliveryContract(
       .limit(1),
   ]);
   const perDocument = mode?.perDocument ?? false;
-  if (links.length === 0) return { contract: null, perDocument, documents: [], catalog };
+  // Договоры УПД из ЭДО без скана — на строках связей (0152).
+  const edoLinks = await db
+    .select({
+      contract: supplierContracts,
+      edoMatchId: deliveryEdoMatches.id,
+      linkedAt: deliveryEdoMatches.contractLinkedAt,
+      linkedByName: users.fullName,
+    })
+    .from(deliveryEdoMatches)
+    .innerJoin(supplierContracts, eq(supplierContracts.id, deliveryEdoMatches.contractId))
+    .leftJoin(users, eq(users.id, deliveryEdoMatches.contractLinkedByUserId))
+    .where(and(eq(deliveryEdoMatches.deliveryId, delivery.id), isNotNull(deliveryEdoMatches.contractId)))
+    .orderBy(asc(deliveryEdoMatches.id));
+  if (links.length === 0 && edoLinks.length === 0) {
+    return { contract: null, perDocument, documents: [], edoDocuments: [], catalog };
+  }
 
   const general = links.find((l) => l.sourceDocumentId === null) ?? null;
   const own = links.filter((l): l is LinkRow & { sourceDocumentId: string } => l.sourceDocumentId !== null);
-  const [codes, deliveryInns, docInns] = await Promise.all([
+  const [codes, deliveryInns, docInns, edoInns] = await Promise.all([
     siteCodesById(db),
     general ? loadDeliveryPartyInns(db, delivery.id) : Promise.resolve(null),
     Promise.all(own.map((l) => loadDocumentSupplierInns(db, delivery.id, l.sourceDocumentId))),
+    Promise.all(edoLinks.map((l) => loadEdoDocumentSupplierInns(db, delivery.id, l.edoMatchId))),
   ]);
   return {
     contract: general
@@ -216,6 +273,21 @@ export async function getDeliveryContract(
     documents: own.map((l, i) => ({
       documentId: l.sourceDocumentId,
       contract: toDeliveryContract(l, codes, docInns[i]!, delivery.siteId),
+    })),
+    edoDocuments: edoLinks.map((l, i) => ({
+      edoMatchId: l.edoMatchId,
+      contract: toDeliveryContract(
+        {
+          contract: l.contract,
+          sourceDocumentId: null,
+          // CHECK contract_linked_chk: при договоре время привязки есть всегда.
+          linkedAt: l.linkedAt ?? new Date(0),
+          linkedByName: l.linkedByName,
+        },
+        codes,
+        edoInns[i]!,
+        delivery.siteId,
+      ),
     })),
     catalog,
   };
@@ -228,6 +300,8 @@ export type ContractCandidateQuery = {
   deliverySiteId: string;
   /** null — общий договор приёмки; иначе подбор для документа (по его ИНН). */
   documentId: string | null;
+  /** Подбор для УПД из ЭДО без скана (по ИНН продавца); documentId тогда null. */
+  edoMatchId?: string | null;
   q?: string;
   allSuppliers: boolean;
   limit: number;
@@ -248,17 +322,26 @@ export async function findContractCandidates(
   query: ContractCandidateQuery,
 ): Promise<{ items: ContractCandidate[]; total: number; context: ContractCandidatesContext }> {
   const c = supplierContracts;
+  const edoMatchId = query.edoMatchId ?? null;
   const [supplierInns, codes, catalog, current] = await Promise.all([
-    query.documentId === null
-      ? loadDeliveryPartyInns(db, query.deliveryId).then((x) => x.supplierInns)
-      : loadDocumentSupplierInns(db, query.deliveryId, query.documentId),
+    edoMatchId !== null
+      ? loadEdoDocumentSupplierInns(db, query.deliveryId, edoMatchId)
+      : query.documentId === null
+        ? loadDeliveryPartyInns(db, query.deliveryId).then((x) => x.supplierInns)
+        : loadDocumentSupplierInns(db, query.deliveryId, query.documentId),
     siteCodesById(db),
     readCatalogInfo(db),
-    db
-      .select({ contractId: deliveryContracts.contractId })
-      .from(deliveryContracts)
-      .where(scopeWhere(query.deliveryId, query.documentId))
-      .limit(1),
+    edoMatchId !== null
+      ? db
+          .select({ contractId: deliveryEdoMatches.contractId })
+          .from(deliveryEdoMatches)
+          .where(and(eq(deliveryEdoMatches.deliveryId, query.deliveryId), eq(deliveryEdoMatches.id, edoMatchId)))
+          .limit(1)
+      : db
+          .select({ contractId: deliveryContracts.contractId })
+          .from(deliveryContracts)
+          .where(scopeWhere(query.deliveryId, query.documentId))
+          .limit(1),
   ]);
   const inns = { supplierInns };
   const supplierKnown = inns.supplierInns.size > 0;
@@ -315,6 +398,7 @@ export async function findContractCandidates(
     total: Number(totalRow?.n ?? 0),
     context: {
       documentId: query.documentId,
+      edoMatchId,
       supplierInns: [...inns.supplierInns].sort(),
       supplierKnown,
       filteredBySupplier,
@@ -388,6 +472,38 @@ async function checkDocumentScope(
   return null;
 }
 
+/**
+ * Свободная УПД из ЭДО этой приёмки под FOR UPDATE — область договора 0152.
+ * Зовётся после блокировки приёмки: порядок deliveries → delivery_edo_matches
+ * тот же, что у recipient-mode и удаления связи.
+ */
+async function lockEdoScope(
+  tx: Tx,
+  delivery: DeliveryLockRow,
+  edoMatchId: string,
+): Promise<
+  | { ok: true; contractId: string | null }
+  | ScopeFailure
+> {
+  if (!delivery.recipientsPerDocument) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'per_document_off',
+      message: 'Договор по документу выбирают в режиме «Разные получатели по документам» — он выключен',
+      siteId: delivery.siteId,
+    };
+  }
+  const [match] = await tx
+    .select({ contractId: deliveryEdoMatches.contractId, sectionDocumentId: deliveryEdoMatches.sectionDocumentId })
+    .from(deliveryEdoMatches)
+    .where(and(eq(deliveryEdoMatches.deliveryId, delivery.id), eq(deliveryEdoMatches.id, edoMatchId)))
+    .for('update');
+  // УПД в блоке скана живёт договором блока — своей области у неё нет.
+  if (!match || match.sectionDocumentId !== null) return { ok: false, status: 404, error: 'document_not_linked' };
+  return { ok: true, contractId: match.contractId };
+}
+
 export type SetContractResult =
   | { ok: true; changed: boolean; siteId: string }
   | { ok: false; status: 404; error: 'not_found' | 'contract_not_found' | 'document_not_linked' }
@@ -405,17 +521,27 @@ export async function setDeliveryContract(
     deliveryId: string;
     /** null — общий договор приёмки. */
     documentId: string | null;
+    /** Договор УПД из ЭДО без скана; documentId тогда null. */
+    edoMatchId?: string | null;
     contractId: string;
     replaceContractId: string | null;
     userId: string | null;
   },
 ): Promise<SetContractResult> {
+  const edoMatchId = input.edoMatchId ?? null;
   return db.transaction(async (tx) => {
     const delivery = await lockDelivery(tx, input.deliveryId);
     if (!delivery) return { ok: false, status: 404, error: 'not_found' } as const;
-    const scopeFailure = await checkDocumentScope(tx, delivery, input.documentId);
-    if (scopeFailure) return scopeFailure;
-    const current = await currentLink(tx, delivery.id, input.documentId);
+    let current: string | null;
+    if (edoMatchId !== null) {
+      const edo = await lockEdoScope(tx, delivery, edoMatchId);
+      if (!edo.ok) return edo;
+      current = edo.contractId;
+    } else {
+      const scopeFailure = await checkDocumentScope(tx, delivery, input.documentId);
+      if (scopeFailure) return scopeFailure;
+      current = await currentLink(tx, delivery.id, input.documentId);
+    }
     if (current === input.contractId) return { ok: true, changed: false, siteId: delivery.siteId } as const;
 
     if (delivery.pendingDeletionAt !== null) {
@@ -464,21 +590,29 @@ export async function setDeliveryContract(
       } as const;
     }
 
-    await tx
-      .insert(deliveryContracts)
-      .values({
-        deliveryId: delivery.id,
-        sourceDocumentId: input.documentId,
-        contractId: contract.id,
-        linkedByUserId: input.userId,
-      })
-      .onConflictDoUpdate({
-        target: [deliveryContracts.deliveryId, deliveryContracts.sourceDocumentId],
-        set: { contractId: contract.id, linkedByUserId: input.userId, linkedAt: sql`now()` },
-      });
+    if (edoMatchId !== null) {
+      await tx
+        .update(deliveryEdoMatches)
+        .set({ contractId: contract.id, contractLinkedByUserId: input.userId, contractLinkedAt: sql`now()` })
+        .where(eq(deliveryEdoMatches.id, edoMatchId));
+    } else {
+      await tx
+        .insert(deliveryContracts)
+        .values({
+          deliveryId: delivery.id,
+          sourceDocumentId: input.documentId,
+          contractId: contract.id,
+          linkedByUserId: input.userId,
+        })
+        .onConflictDoUpdate({
+          target: [deliveryContracts.deliveryId, deliveryContracts.sourceDocumentId],
+          set: { contractId: contract.id, linkedByUserId: input.userId, linkedAt: sql`now()` },
+        });
+    }
     await tx.insert(deliveryContractEvents).values({
       deliveryId: delivery.id,
       sourceDocumentId: input.documentId,
+      edoMatchId,
       contractId: contract.id,
       previousContractId: current,
       kind: current ? 'replaced' : 'linked',
@@ -500,12 +634,30 @@ export type UnsetContractResult =
  */
 export async function unsetDeliveryContract(
   db: Db,
-  input: { deliveryId: string; documentId: string | null; expectedContractId: string; userId: string | null },
+  input: {
+    deliveryId: string;
+    documentId: string | null;
+    /** Договор УПД из ЭДО без скана; documentId тогда null. */
+    edoMatchId?: string | null;
+    expectedContractId: string;
+    userId: string | null;
+  },
 ): Promise<UnsetContractResult> {
+  const edoMatchId = input.edoMatchId ?? null;
   return db.transaction(async (tx) => {
     const delivery = await lockDelivery(tx, input.deliveryId);
     if (!delivery) return { ok: false, status: 404, error: 'not_found' } as const;
-    const current = await currentLink(tx, delivery.id, input.documentId);
+    // Связи нет (или она уже в блоке, или удалена) — договора тоже нет: цель достигнута.
+    const current =
+      edoMatchId !== null
+        ? ((
+            await tx
+              .select({ contractId: deliveryEdoMatches.contractId })
+              .from(deliveryEdoMatches)
+              .where(and(eq(deliveryEdoMatches.deliveryId, delivery.id), eq(deliveryEdoMatches.id, edoMatchId)))
+              .for('update')
+          )[0]?.contractId ?? null)
+        : await currentLink(tx, delivery.id, input.documentId);
     if (current === null) return { ok: true, changed: false, siteId: delivery.siteId } as const;
     if (delivery.pendingDeletionAt !== null) {
       return {
@@ -525,10 +677,18 @@ export async function unsetDeliveryContract(
         siteId: delivery.siteId,
       } as const;
     }
-    await tx.delete(deliveryContracts).where(scopeWhere(delivery.id, input.documentId));
+    if (edoMatchId !== null) {
+      await tx
+        .update(deliveryEdoMatches)
+        .set({ contractId: null, contractLinkedByUserId: null, contractLinkedAt: null })
+        .where(eq(deliveryEdoMatches.id, edoMatchId));
+    } else {
+      await tx.delete(deliveryContracts).where(scopeWhere(delivery.id, input.documentId));
+    }
     await tx.insert(deliveryContractEvents).values({
       deliveryId: delivery.id,
       sourceDocumentId: input.documentId,
+      edoMatchId,
       contractId: null,
       previousContractId: current,
       kind: 'unlinked',
@@ -579,7 +739,66 @@ async function dropDocumentLinks(
  * в транзакции recipient-mode под блокировкой приёмки.
  */
 export async function resetDocumentContracts(tx: Tx, deliveryId: string, userId: string | null): Promise<number> {
-  return dropDocumentLinks(tx, deliveryId, null, userId, 'mode_off');
+  const documents = await dropDocumentLinks(tx, deliveryId, null, userId, 'mode_off');
+  const edo = await dropEdoContracts(tx, deliveryId, null, userId, 'mode_off');
+  return documents + edo;
+}
+
+/**
+ * Снять договоры УПД из ЭДО без скана (0152) с записью в журнал. matchId null —
+ * все связи приёмки. Прежний договор читается до обнуления: returning отдал бы
+ * уже новые значения.
+ */
+async function dropEdoContracts(
+  tx: Tx,
+  deliveryId: string,
+  matchId: string | null,
+  userId: string | null,
+  reason: DeliveryContractEventReason,
+): Promise<number> {
+  const where = and(
+    eq(deliveryEdoMatches.deliveryId, deliveryId),
+    isNotNull(deliveryEdoMatches.contractId),
+    matchId === null ? undefined : eq(deliveryEdoMatches.id, matchId),
+  );
+  const linked = await tx
+    .select({ id: deliveryEdoMatches.id, contractId: deliveryEdoMatches.contractId })
+    .from(deliveryEdoMatches)
+    .where(where)
+    .orderBy(asc(deliveryEdoMatches.id))
+    .for('update');
+  if (linked.length === 0) return 0;
+  await tx
+    .update(deliveryEdoMatches)
+    .set({ contractId: null, contractLinkedByUserId: null, contractLinkedAt: null })
+    .where(where);
+  await tx.insert(deliveryContractEvents).values(
+    linked.map((r) => ({
+      deliveryId,
+      sourceDocumentId: null,
+      edoMatchId: r.id,
+      contractId: null,
+      previousContractId: r.contractId,
+      kind: 'unlinked' as const,
+      reason,
+      userId,
+    })),
+  );
+  return linked.length;
+}
+
+/**
+ * УПД из ЭДО отвязывают от приёмки — её договор снимается с записью в журнал
+ * до удаления строки связи. Зовётся в транзакции DELETE …/edo-matches/:matchId
+ * под блокировкой приёмки.
+ */
+export async function dropEdoMatchContract(
+  tx: Tx,
+  deliveryId: string,
+  matchId: string,
+  userId: string | null,
+): Promise<number> {
+  return dropEdoContracts(tx, deliveryId, matchId, userId, 'document_unlinked');
 }
 
 /**

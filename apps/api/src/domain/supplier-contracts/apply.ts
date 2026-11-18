@@ -178,8 +178,13 @@ export async function readContractsState(ex: Executor): Promise<ContractsState> 
     readContractRows(ex),
     ex.execute(sql`select id::text as id, code from sites`),
     ex.execute(sql`
-      select distinct dc.contract_id::text as contract_id, d.display_id::text as display_id
-      from delivery_contracts dc join deliveries d on d.id = dc.delivery_id
+      select distinct l.contract_id::text as contract_id, d.display_id::text as display_id
+      from (
+        select delivery_id, contract_id from delivery_contracts
+        union all
+        -- Договоры УПД из ЭДО без скана (0152) — на строках связей.
+        select delivery_id, contract_id from delivery_edo_matches where contract_id is not null
+      ) l join deliveries d on d.id = l.delivery_id
       order by 2`),
   ]);
   const sitesByCode = new Map(rowsOf<{ id: string; code: string }>(sitesRes).map((s) => [s.code, s.id]));
@@ -501,7 +506,8 @@ async function checkRevert(tx: Tx, s: ContractsImportSnapshot): Promise<RevertOb
 
   const insertIds = s.inserts.map((i) => i.id);
   // Блокируем вставленные строки до проверки привязок: FOR UPDATE конфликтует с
-  // KEY SHARE, который берёт вставка в delivery_contracts по FK, — привязка,
+  // KEY SHARE, который берёт по FK вставка в delivery_contracts или запись
+  // delivery_edo_matches.contract_id (договор УПД из ЭДО, 0152), — привязка,
   // начатая после проверки, дождётся отката и упадёт на FK, а не проскочит.
   for (const part of chunks(insertIds, CHUNK)) {
     await tx.execute(sql`
@@ -513,9 +519,13 @@ async function checkRevert(tx: Tx, s: ContractsImportSnapshot): Promise<RevertOb
   for (const part of chunks(insertIds, CHUNK)) {
     const res = rowsOf<{ contract_id: string; display_id: string }>(
       await tx.execute(sql`
-        select distinct dc.contract_id::text as contract_id, d.display_id::text as display_id
-        from delivery_contracts dc join deliveries d on d.id = dc.delivery_id
-        where dc.contract_id = any(string_to_array(${part.join(',')}, ',')::uuid[])`),
+        select distinct l.contract_id::text as contract_id, d.display_id::text as display_id
+        from (
+          select delivery_id, contract_id from delivery_contracts
+          union all
+          select delivery_id, contract_id from delivery_edo_matches where contract_id is not null
+        ) l join deliveries d on d.id = l.delivery_id
+        where l.contract_id = any(string_to_array(${part.join(',')}, ',')::uuid[])`),
     );
     for (const l of res) links.set(l.contract_id, [...(links.get(l.contract_id) ?? []), l.display_id]);
   }

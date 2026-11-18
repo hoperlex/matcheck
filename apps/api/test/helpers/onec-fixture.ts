@@ -127,6 +127,13 @@ export function fullBundle(): RawBundle {
         sha256: 'a'.repeat(64),
         sizeBytes: 5000,
         xmlAvailable: true,
+        // В блоке документа своих настроек нет (CHECK section_own_chk).
+        ownRecipient: false,
+        contractor: null,
+        mol: null,
+        ownPurpose: false,
+        purpose: null,
+        contract: null,
       },
       {
         matchId: 'd0000000-0000-4000-8000-000000000002',
@@ -143,6 +150,20 @@ export function fullBundle(): RawBundle {
         sha256: 'b'.repeat(64),
         sizeBytes: 4000,
         xmlAvailable: true,
+        // Свободная УПД режима «Разные получатели» (0152): свой признак и договор,
+        // получатель — общий.
+        ownRecipient: false,
+        contractor: null,
+        mol: null,
+        ownPurpose: true,
+        purpose: 'tolling_act',
+        contract: {
+          onecId: 'e0000000-0000-4000-8000-000000000005',
+          counterpartyOnecId: 'e0000000-0000-4000-8000-000000000006',
+          number: 'ЭДО-57',
+          date: '2025-03-01',
+          name: 'Договор по УПД из ЭДО',
+        },
       },
     ],
     sharedWith: new Map([

@@ -115,6 +115,7 @@ describe('инварианты хеша', () => {
     b.header.supplier!.name = 'ПОСТАВЩИК АО';
     b.header.contractor!.name = 'Подрядчик (переименован)';
     b.contracts[0]!.name = 'Другое имя договора';
+    b.edo[1]!.contract!.name = 'Другое имя договора ЭДО';
     b.items[0]!.material!.name = 'Арматура 12 мм';
     b.sharedWith = new Map();
     b.duplicates = new Map();
@@ -132,6 +133,17 @@ describe('инварианты хеша', () => {
     ['ИНН поставщика документа', (b) => void (b.documents.get(DOC_LINKED)!.supplier.inn = '5000000009')],
     ['отвязка УПД из ЭДО', (b) => void b.edo.pop()],
     ['другая УПД из ЭДО (sha256)', (b) => void (b.edo[0]!.sha256 = 'c'.repeat(64))],
+    // v2 (0152): свободная УПД из ЭДО — документ режима «Разные получатели».
+    ['признак УПД из ЭДО', (b) => void (b.edo[1]!.purpose = 'realization')],
+    [
+      'получатель УПД из ЭДО',
+      (b) => {
+        b.edo[1]!.ownRecipient = true;
+        b.edo[1]!.contractor = { id: 'c0000000-0000-4000-8000-000000000009', inn: '7700000009', kpp: null, name: 'ДРУГОЙ' };
+      },
+    ],
+    ['договор УПД из ЭДО', (b) => void (b.edo[1]!.contract!.onecId = 'e0000000-0000-4000-8000-000000000009')],
+    ['договор УПД из ЭДО снят (действует общий)', (b) => void (b.edo[1]!.contract = null)],
     ['отвязка документа (строки стали nodoc)', (b) => void b.links.splice(0, 1)],
     ['пометка — нет; удаление строки', (b) => void b.items.pop()],
   ])('меняет хеш: %s', (_, mutate) => {
@@ -144,6 +156,10 @@ describe('инварианты хеша', () => {
     const b = fullBundle();
     b.edo[0]!.matchId = 'd0000000-0000-4000-8000-0000000000ff';
     expect(hashOf(b)).toBe(base);
+  });
+
+  it('версия ядра — 2 (свои настройки УПД из ЭДО, 0152)', () => {
+    expect(HASH_VERSION).toBe(2);
   });
 
   it('ядро не содержит названий и производных сумм', () => {

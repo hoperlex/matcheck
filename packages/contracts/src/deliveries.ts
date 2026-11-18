@@ -204,6 +204,28 @@ export const DocumentRecipientSchema = z.object({
 });
 export type DocumentRecipient = z.infer<typeof DocumentRecipientSchema>;
 
+/**
+ * Свободная УПД из ЭДО (связь без блока скана) в режиме «Разные получатели по
+ * документам» — документ приёмки наравне с загруженным (миграция 0152).
+ * Сервер отдаёт ВСЕ такие УПД, в том числе без своих настроек (по ним рисуются
+ * блоки карточки и окна просмотра), и только при включённом режиме.
+ */
+export const EdoDocumentRecipientSchema = z.object({
+  matchId: z.string().uuid(),
+  /** Оператор ЭДО ('diadoc' | 'sbis'). */
+  operator: z.string().nullable(),
+  docNumber: z.string().nullable(),
+  docDate: z.string().nullable(),
+  ownRecipient: z.boolean(),
+  contractorId: z.string().uuid().nullable(),
+  contractorName: z.string().nullable(),
+  recipientMolId: z.string().uuid().nullable(),
+  recipientMolName: z.string().nullable(),
+  ownPurpose: z.boolean(),
+  purpose: DeliveryPurposeSchema.nullable(),
+});
+export type EdoDocumentRecipient = z.infer<typeof EdoDocumentRecipientSchema>;
+
 /** Не больше 50 приёмок в группе — ровно столько привязывает одна пачка ЭДО. */
 export const DELIVERY_GROUP_MAX = 50;
 
@@ -267,6 +289,13 @@ export const DeliverySchema = z.object({
   purpose: DeliveryPurposeSchema.nullable().optional(),
   recipientsPerDocument: z.boolean().optional(),
   documentRecipients: z.array(DocumentRecipientSchema).optional(),
+  /**
+   * Документы режима «Разные получатели»: загруженные плюс свободные УПД из
+   * ЭДО. Тумблер доступен от двух. Optional: /sync поле не собирает.
+   */
+  recipientDocumentCount: z.number().int().nonnegative().optional(),
+  /** Свободные УПД из ЭДО — только при включённом режиме (см. схему). */
+  edoDocuments: z.array(EdoDocumentRecipientSchema).optional(),
   confirmedByMolUserId: z.string().uuid().nullable(),
   confirmedByMolUserEmail: z.string().nullable(),
   confirmedByMolAt: z.string().nullable(),

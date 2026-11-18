@@ -333,9 +333,11 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const [linkOrderOpen, setLinkOrderOpen] = useState(false);
   // Окно выбора договора 1С: для какой области открыто. documentId = null —
   // общий договор приёмки, иначе — договор документа (режим «разные
-  // получатели»); label — «УПД № …» для заголовка окна.
+  // получатели»); edoMatchId — договор УПД из ЭДО без скана (тот же режим,
+  // 0152); label — «УПД № …» для заголовка окна.
   const [contractTarget, setContractTarget] = useState<{
     documentId: string | null;
+    edoMatchId?: string | null;
     label: string | null;
   } | null>(null);
   // Блок материалов, к которому подбирается УПД из ЭДО; null — к приёмке
@@ -1233,9 +1235,18 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // поменяли: показываем текущий и перечитываем.
   const contractKeys = contractQueryKeys(deliveryId);
   const unlinkContract = useMutation({
-    mutationFn: ({ expected, documentId }: { expected: string; documentId: string | null }) => {
+    mutationFn: ({
+      expected,
+      documentId,
+      edoMatchId = null,
+    }: {
+      expected: string;
+      documentId: string | null;
+      edoMatchId?: string | null;
+    }) => {
       const qs = new URLSearchParams({ expectedContractId: expected });
-      if (documentId) qs.set('documentId', documentId);
+      if (edoMatchId) qs.set('edoMatchId', edoMatchId);
+      else if (documentId) qs.set('documentId', documentId);
       return api.delete<DeliveryContractResponse>(`/deliveries/${deliveryId}/contract?${qs.toString()}`);
     },
     onSuccess: (data) => {
@@ -1416,6 +1427,33 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
       return api.patch<Delivery>(
         `/deliveries/${loadedDelivery.id}/sources/${docId}/purpose`,
+        patch,
+      );
+    },
+    onMutate: beforeDeliveryPatch,
+    onSuccess: applyDeliveryResponse,
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  // УПД из ЭДО без скана — документ того же режима (0152): те же тела запросов.
+  const patchEdoRecipient = useMutation({
+    mutationFn: async ({ matchId, patch }: { matchId: string; patch: DocumentRecipientPatch }) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.patch<Delivery>(
+        `/deliveries/${loadedDelivery.id}/edo-matches/${matchId}/recipient`,
+        patch,
+      );
+    },
+    onMutate: beforeDeliveryPatch,
+    onSuccess: applyDeliveryResponse,
+    onError: (err: Error) => message.error(err.message),
+  });
+
+  const patchEdoPurpose = useMutation({
+    mutationFn: async ({ matchId, patch }: { matchId: string; patch: DocumentPurposePatch }) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      return api.patch<Delivery>(
+        `/deliveries/${loadedDelivery.id}/edo-matches/${matchId}/purpose`,
         patch,
       );
     },
@@ -1875,12 +1913,25 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     // а не по роли: Мониторинг получает её выданным «Редактировать».
     const canEditDocumentRecipient =
       canEditDelivery && hasCapability('operations.edit.document_recipient');
-    const ownDocumentPurposeExists = (loadedDelivery.documentRecipients ?? []).some(
-      (x) => x.ownPurpose,
-    );
+    // УПД из ЭДО без скана — документы того же режима (0152); сервер отдаёт
+    // их только при включённом режиме.
+    const edoDocuments = loadedDelivery.edoDocuments ?? [];
+    const ownDocumentPurposeExists =
+      (loadedDelivery.documentRecipients ?? []).some((x) => x.ownPurpose) ||
+      edoDocuments.some((x) => x.ownPurpose);
+    // Любой PATCH настроек документа (скан или УПД из ЭДО) — чипы ждут ответа.
+    const documentPatchPending =
+      patchDocumentRecipient.isPending ||
+      patchDocumentPurpose.isPending ||
+      patchEdoRecipient.isPending ||
+      patchEdoPurpose.isPending;
     // Договоры 1С документов (режим «разные получатели»): id документа → договор.
     const documentContracts = new Map(
       (contractQuery.data?.documents ?? []).map((x) => [x.documentId, x.contract] as const),
+    );
+    // То же для УПД из ЭДО без скана: id связи → договор.
+    const edoContracts = new Map(
+      (contractQuery.data?.edoDocuments ?? []).map((x) => [x.edoMatchId, x.contract] as const),
     );
     // Выбирать договор можно, только когда справочник не пуст (импорт был).
     const canPickContract =
@@ -1891,10 +1942,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       (contractQuery.data?.catalog.total ?? 0) > 0;
     // Документы, которые потеряют свои настройки при выключении режима:
     // свой получатель или признак (documentRecipients — только такие) и свой договор.
-    const ownDocumentSettingsCount = new Set([
-      ...(loadedDelivery.documentRecipients ?? []).map((x) => x.sourceDocumentId),
-      ...documentContracts.keys(),
-    ]).size;
+    const ownDocumentSettingsCount =
+      new Set([
+        ...(loadedDelivery.documentRecipients ?? []).map((x) => x.sourceDocumentId),
+        ...documentContracts.keys(),
+      ]).size +
+      new Set([
+        ...edoDocuments.filter((x) => x.ownRecipient || x.ownPurpose).map((x) => x.matchId),
+        ...edoContracts.keys(),
+      ]).size;
     const supplierOrders = supplierOrdersQuery.data?.items ?? [];
     // УПД из ЭДО: привязанные к блоку показываются в его заголовке, остальные —
     // в шапке. Блок, которого нет среди связанных документов, тоже шапка:
@@ -2102,8 +2158,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                 )}
               </InlineEditChip>
 
+              {/* Документы режима — сканы и УПД из ЭДО без скана (приёмка 22973:
+                  две УПД из Диадока). Включённый режим держит тумблер, даже
+                  если документ остался один, — иначе его нечем выключить. */}
               {(loadedDelivery.recipientsPerDocument ||
-                loadedDelivery.sourceDocumentIds.length >= 2) && (
+                (loadedDelivery.recipientDocumentCount ??
+                  loadedDelivery.sourceDocumentIds.length) >= 2) && (
                 <Tooltip
                   title={
                     loadedDelivery.recipientsPerDocument &&
@@ -2504,11 +2564,14 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           open={contractTarget !== null}
           deliveryId={loadedDelivery?.id ?? null}
           documentId={contractTarget?.documentId ?? null}
+          edoMatchId={contractTarget?.edoMatchId ?? null}
           documentLabel={contractTarget?.label ?? null}
           current={
-            contractTarget?.documentId
-              ? (documentContracts.get(contractTarget.documentId) ?? null)
-              : contract
+            contractTarget?.edoMatchId
+              ? (edoContracts.get(contractTarget.edoMatchId) ?? null)
+              : contractTarget?.documentId
+                ? (documentContracts.get(contractTarget.documentId) ?? null)
+                : contract
           }
           onClose={() => setContractTarget(null)}
         />
@@ -2762,12 +2825,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     canEditRecipient={canEditDocumentRecipient}
                     canPickContractor={canPickContractor}
                     canEditPurpose={canChoosePurpose}
-                    disabled={
-                      recipientDirty ||
-                      isPending ||
-                      patchDocumentRecipient.isPending ||
-                      patchDocumentPurpose.isPending
-                    }
+                    disabled={recipientDirty || isPending || documentPatchPending}
                     mols={responsiblePersons}
                     molsLoading={responsiblePersonsQuery.isLoading}
                     onRecipient={(patch) => patchDocumentRecipient.mutate({ docId: doc.id, patch })}
@@ -2830,6 +2888,45 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             shared={edoShared}
             factRows={items}
             otherEdoOnDelivery={edoMatches.length > 1}
+            // Режим «Разные получатели»: УПД из ЭДО без скана — документ режима
+            // (0152), те же получатель, признак и договор, что у блока скана.
+            // Связь, которой ещё нет в edoDocuments (DTO не перечитан), чипов
+            // не получает: сервер её примет, но показать нечего.
+            extra={(match) => {
+              if (!loadedDelivery.recipientsPerDocument) return null;
+              if (!edoDocuments.some((x) => x.matchId === match.id)) return null;
+              const label = `УПД № ${match.docNumber ?? 'без номера'} из ЭДО`;
+              return (
+                <>
+                  <DocumentRecipientChips
+                    delivery={loadedDelivery}
+                    edoMatchId={match.id}
+                    canEditRecipient={canEditDocumentRecipient}
+                    canPickContractor={canPickContractor}
+                    canEditPurpose={canChoosePurpose}
+                    disabled={recipientDirty || isPending || documentPatchPending}
+                    mols={responsiblePersons}
+                    molsLoading={responsiblePersonsQuery.isLoading}
+                    onRecipient={(patch) => patchEdoRecipient.mutate({ matchId: match.id, patch })}
+                    onPurpose={(patch) => patchEdoPurpose.mutate({ matchId: match.id, patch })}
+                  />
+                  {canViewContract && (
+                    <DocumentContractControl
+                      own={edoContracts.get(match.id) ?? null}
+                      general={contract}
+                      canLink={canPickContract}
+                      onPick={() =>
+                        setContractTarget({ documentId: null, edoMatchId: match.id, label })
+                      }
+                      onUnlink={(expected) =>
+                        unlinkContract.mutate({ expected, documentId: null, edoMatchId: match.id })
+                      }
+                      unlinkPending={unlinkContract.isPending}
+                    />
+                  )}
+                </>
+              );
+            }}
           />
         )}
 

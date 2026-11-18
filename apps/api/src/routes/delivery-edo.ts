@@ -3,6 +3,7 @@ import { and, asc, eq, isNotNull, isNull, or, sql as drSql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { asZod } from '../lib/fastify.js';
+import { dropEdoMatchContract } from '../domain/supplier-contracts/delivery-contract.js';
 import { EdoBatchDeliveryGroupSchema, ErrorResponseSchema } from '@matcheck/contracts';
 import type { Db } from '../db/client.js';
 import {
@@ -916,6 +917,9 @@ export function registerDeliveryEdoRoutes(rawApp: FastifyInstance): void {
           .limit(1);
         if (!delivery) return { status: 'not_found' as const };
         if (delivery.pendingDeletionAt) return { status: 'pending_deletion' as const };
+        // Свой договор УПД (режим «Разные получатели», 0152) уходит вместе со
+        // связью — журнал пишется до удаления строки.
+        await dropEdoMatchContract(tx, req.params.id, req.params.matchId, req.user?.id ?? null);
         const [removed] = await tx
           .delete(deliveryEdoMatches)
           .where(

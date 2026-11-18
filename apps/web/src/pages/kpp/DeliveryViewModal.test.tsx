@@ -114,4 +114,66 @@ describe('DeliveryViewModal: вход в редактор', () => {
     expect(screen.getByText(/Получатель: — не указан/)).toBeTruthy();
     expect(screen.getByText(/Признак: — не выбран/)).toBeTruthy();
   });
+  it('УПД из ЭДО без скана (0152): блоки с получателем и признаком без права правки и без запросов', () => {
+    can.mockReturnValue(false);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    renderModal({
+      delivery: {
+        id: '11111111-1111-4111-8111-111111111111',
+        status: { code: 'filled', name: 'Оформлена' },
+        arrivedAt: null,
+        updatedAt: '2026-11-18T10:00:00Z',
+        photos: [],
+        items: [],
+        sourceDocumentIds: [],
+        sourceDocuments: [],
+        recipientsPerDocument: true,
+        recipientMolId: null,
+        contractorId: null,
+        purpose: 'tolling_act',
+        documentRecipients: [],
+        edoDocuments: [
+          {
+            matchId: '33333333-3333-4333-8333-333333333333',
+            operator: 'diadoc',
+            docNumber: '201/21126982-2332',
+            docDate: '2026-10-29',
+            ownRecipient: true,
+            contractorId: '44444444-4444-4444-8444-444444444444',
+            contractorName: 'ООО КС',
+            recipientMolId: null,
+            recipientMolName: null,
+            ownPurpose: false,
+            purpose: null,
+          },
+          {
+            matchId: '55555555-5555-4555-8555-555555555555',
+            operator: 'sbis',
+            docNumber: '1438',
+            docDate: '2026-10-30',
+            ownRecipient: false,
+            contractorId: null,
+            contractorName: null,
+            recipientMolId: null,
+            recipientMolName: null,
+            ownPurpose: false,
+            purpose: null,
+          },
+        ],
+        pendingDeletionAt: null,
+        reviewState: null,
+        reviewNote: null,
+        reviewedByUserEmail: null,
+        reviewedAt: null,
+      },
+    });
+    expect(screen.getByText('Материалы · УПД № 201/21126982-2332 из ЭДО · Диадок')).toBeTruthy();
+    expect(screen.getByText('Материалы · УПД № 1438 из ЭДО · СБИС')).toBeTruthy();
+    expect(screen.getByText(/Получатель: Подрядчик: ООО КС/)).toBeTruthy();
+    expect(screen.getByText(/Получатель: как у приёмки: — не указан/)).toBeTruthy();
+    expect(screen.getAllByText(/Признак: как у приёмки: Давальческий акт/)).toHaveLength(2);
+    // Данные — из строки списка: чтение ЭДО (право правки) не нужно.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
 });

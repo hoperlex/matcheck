@@ -75,6 +75,18 @@ export const OnecEdoSchema = z.object({
 });
 export type OnecEdo = z.infer<typeof OnecEdoSchema>;
 
+/**
+ * УПД из ЭДО, привязанная к приёмке целиком (без блока документа). В режиме
+ * «Разные получатели по документам» у неё свои получатель, признак и договор —
+ * как у документа: собственные значения, иначе общие приёмки.
+ */
+export const OnecDeliveryEdoSchema = OnecEdoSchema.extend({
+  recipient: OnecRecipientSchema,
+  purpose: z.string().nullable(),
+  contract: OnecContractSchema.nullable(),
+});
+export type OnecDeliveryEdo = z.infer<typeof OnecDeliveryEdoSchema>;
+
 export const OnecLineSchema = z.object({
   lineNo: z.number().int(),
   name: z.string(),
@@ -191,7 +203,7 @@ export const OnecDeliverySchema = z.object({
   recipient: OnecRecipientSchema,
   contract: OnecContractSchema.nullable(),
   /** УПД из ЭДО, привязанные к приёмке целиком (не к блоку документа). */
-  edo: z.array(OnecEdoSchema),
+  edo: z.array(OnecDeliveryEdoSchema),
   groups: z.array(OnecGroupSchema),
   totals: OnecTotalsSchema,
   contentHash: z.string(),

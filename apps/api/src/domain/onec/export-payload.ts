@@ -12,6 +12,7 @@ import {
   type DeliveryPurpose,
   type OnecContract,
   type OnecDelivery,
+  type OnecDeliveryEdo,
   type OnecDocument,
   type OnecEdo,
   type OnecGroup,
@@ -84,7 +85,15 @@ export type RawDocument = {
 
 export type RawContract = OnecContract & { sourceDocumentId: string | null };
 
-export type RawEdo = Omit<OnecEdo, 'xmlPath'> & { sectionDocumentId: string | null };
+/** Свои настройки документа режима «Разные получатели» — скан или УПД из ЭДО. */
+type RawOwnRecipient = Pick<RawLink, 'ownRecipient' | 'contractor' | 'mol' | 'ownPurpose' | 'purpose'>;
+
+/**
+ * УПД из ЭДО приёмки. Свои получатель, признак и договор (0152) бывают только
+ * у свободной связи (без блока документа) — у связи в блоке они пустые (CHECK).
+ */
+export type RawEdo = Omit<OnecEdo, 'xmlPath'> &
+  RawOwnRecipient & { sectionDocumentId: string | null; contract: OnecContract | null };
 
 export type RawBundle = {
   header: RawHeader;
@@ -237,7 +246,7 @@ function toContract(c: RawContract): OnecContract {
  */
 function documentRecipient(
   header: RawHeader,
-  link: RawLink | undefined,
+  link: RawOwnRecipient | undefined,
 ): { recipient: OnecRecipient; purpose: string | null } {
   const general = {
     contractorId: header.contractor?.id ?? null,
@@ -301,9 +310,18 @@ export function buildDeliveryBody(bundle: RawBundle, snapshotAt: string): OnecDe
   }
 
   const edoByDoc = new Map<string, OnecEdo[]>();
-  const deliveryEdo: OnecEdo[] = [];
+  const deliveryEdo: OnecDeliveryEdo[] = [];
   for (const raw of bundle.edo) {
-    const { sectionDocumentId, ...rest } = raw;
+    const {
+      sectionDocumentId,
+      ownRecipient,
+      contractor,
+      mol,
+      ownPurpose,
+      purpose: ownPurposeValue,
+      contract: ownContract,
+      ...rest
+    } = raw;
     const edo: OnecEdo = {
       ...rest,
       xmlPath: raw.xmlAvailable ? edoXmlPath(header.id, raw.matchId) : null,
@@ -313,7 +331,18 @@ export function buildDeliveryBody(bundle: RawBundle, snapshotAt: string): OnecDe
       list.push(edo);
       edoByDoc.set(sectionDocumentId, list);
     } else {
-      deliveryEdo.push(edo);
+      // УПД к приёмке целиком — документ режима «Разные получатели» (0152):
+      // получатель и признак тем же правилом, что у документа, договор —
+      // свой, иначе общий.
+      const { recipient, purpose } = documentRecipient(header, {
+        ownRecipient,
+        contractor,
+        mol,
+        ownPurpose,
+        purpose: ownPurposeValue,
+      });
+      const contract = ownContract ?? (generalContract ? toContract(generalContract) : null);
+      deliveryEdo.push({ ...edo, recipient, purpose, contract });
     }
   }
 

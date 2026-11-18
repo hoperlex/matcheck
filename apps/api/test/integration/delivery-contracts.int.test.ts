@@ -14,6 +14,7 @@ import type { UserRole } from '@matcheck/contracts';
 import * as schema from '../../src/db/schema.js';
 import { deliveryRoutes } from '../../src/routes/deliveries.js';
 import { supplierContractsRoutes } from '../../src/routes/supplier-contracts.js';
+import { readContractsState } from '../../src/domain/supplier-contracts/apply.js';
 import type { AuthUser } from '../../src/plugins/auth.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -82,6 +83,10 @@ suite('договор 1С в приёмке', () => {
 
   async function clean() {
     await sql`DELETE FROM delivery_contracts`;
+    // Договоры УПД из ЭДО (0152) — на строках связей, RESTRICT к supplier_contracts.
+    await sql`UPDATE delivery_edo_matches
+      SET contract_id = NULL, contract_linked_by_user_id = NULL, contract_linked_at = NULL
+      WHERE contract_id IS NOT NULL`;
     await sql`DELETE FROM delivery_contract_events`;
     await sql`DELETE FROM supplier_contracts`;
     await sql`DELETE FROM supplier_contract_imports`;
@@ -557,6 +562,147 @@ suite('договор 1С в приёмке', () => {
         [null, general],
         [doc1, a],
       ]);
+    });
+  });
+
+  describe('договор УПД из ЭДО без скана (0152)', () => {
+    /** УПД из ЭДО старым путём (импортированная карточка Диадока), без блока или в блоке скана. */
+    async function linkEdo(deliveryId: string, supplierInn: string | null, sectionDocumentId: string | null = null) {
+      const docId = randomUUID();
+      createdDocs.push(docId);
+      await sql`INSERT INTO source_documents (id, kind, direction, status, origin, site_id, doc_number, supplier_inn_raw)
+        VALUES (${docId}, 'upd', 'inbound', 'parsed', 'edo_diadoc', ${siteS}, ${`E-${docId.slice(0, 6)}`}, ${supplierInn})`;
+      const [m] = await sql<{ id: string }[]>`
+        INSERT INTO delivery_edo_matches (delivery_id, source_document_id, section_document_id, linked_by_user_id)
+        VALUES (${deliveryId}, ${docId}, ${sectionDocumentId}, ${managerId}) RETURNING id::text AS id`;
+      return m!.id;
+    }
+    /** Приёмка без сканов с двумя УПД из ЭДО (как 22973): m1 от SUPPLIER_INN, m2 от OTHER_INN. */
+    async function twoEdoDelivery(perDocument = true) {
+      const d = await delivery();
+      const m1 = await linkEdo(d, SUPPLIER_INN);
+      const m2 = await linkEdo(d, OTHER_INN);
+      if (perDocument) expect((await recipientMode(d, true)).statusCode).toBe(200);
+      return { d, m1, m2 };
+    }
+    const putEdo = (d: string, edoMatchId: string, contractId: string, replaceContractId: string | null) =>
+      app.inject({
+        method: 'PUT',
+        url: `/api/v1/deliveries/${d}/contract`,
+        payload: { edoMatchId, contractId, replaceContractId },
+      });
+    const delEdo = (d: string, edoMatchId: string, expectedContractId: string) =>
+      app.inject({
+        method: 'DELETE',
+        url: `/api/v1/deliveries/${d}/contract?expectedContractId=${expectedContractId}&edoMatchId=${edoMatchId}`,
+      });
+    const edoLinks = async (d: string) =>
+      (
+        await sql<{ id: string; contract_id: string | null }[]>`
+          SELECT id::text AS id, contract_id::text AS contract_id FROM delivery_edo_matches
+          WHERE delivery_id = ${d} AND contract_id IS NOT NULL ORDER BY id`
+      ).map((r) => [r.id, r.contract_id]);
+    const edoEvents = async (d: string) =>
+      (
+        await sql<{ kind: string; edo: string | null; doc: string | null; contract_id: string | null; previous: string | null; reason: string | null }[]>`
+          SELECT kind, edo_match_id::text AS edo, source_document_id::text AS doc, contract_id::text AS contract_id,
+                 previous_contract_id::text AS previous, reason
+          FROM delivery_contract_events WHERE delivery_id = ${d} ORDER BY id`
+      ).map((e) => [e.kind, e.edo, e.doc, e.contract_id, e.previous, e.reason]);
+
+    it('выбор → замена → отвязка; журнал с edo_match_id; общий договор рядом не путается', async () => {
+      const { d, m1 } = await twoEdoDelivery();
+      const general = await contract();
+      const a = await contract({ inn: SUPPLIER_INN });
+      const b = await contract();
+      expect((await put(d, general, null)).statusCode).toBe(200);
+      expect((await putEdo(d, m1, a, null)).statusCode).toBe(200);
+      // Договор ЭДО — на строке связи; delivery_contracts — только общий.
+      expect(await links(d)).toEqual([[null, general]]);
+      expect(await edoLinks(d)).toEqual([[m1, a]]);
+      const body = (await get(d)).json();
+      expect(body).toMatchObject({ perDocument: true, contract: { id: general }, documents: [] });
+      expect(body.edoDocuments).toEqual([
+        expect.objectContaining({ edoMatchId: m1, contract: expect.objectContaining({ id: a, supplierMatch: true }) }),
+      ]);
+      // Повтор — 200 без нового события; замена; чужая замена — 409 с текущим.
+      expect((await putEdo(d, m1, a, null)).statusCode).toBe(200);
+      expect((await putEdo(d, m1, b, a)).statusCode).toBe(200);
+      const stale = await putEdo(d, m1, a, a);
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json()).toMatchObject({ error: 'contract_changed', current: { id: b } });
+      // Общий договор после этого по-прежнему меняется старым путём (ON CONFLICT по двум колонкам).
+      const general2 = await contract();
+      expect((await put(d, general2, general)).statusCode).toBe(200);
+      expect((await delEdo(d, m1, b)).statusCode).toBe(200);
+      expect((await delEdo(d, m1, b)).statusCode).toBe(200);
+      expect(await edoLinks(d)).toEqual([]);
+      expect(await links(d)).toEqual([[null, general2]]);
+      expect((await edoEvents(d)).filter((e) => e[1] === m1)).toEqual([
+        ['linked', m1, null, a, null, null],
+        ['replaced', m1, null, b, a, null],
+        ['unlinked', m1, null, null, b, null],
+      ]);
+    });
+
+    it('режим выключен — 409; связь в блоке скана и чужая — 404; документ и ЭДО сразу — 400', async () => {
+      const { d, m1 } = await twoEdoDelivery(false);
+      const a = await contract();
+      const off = await putEdo(d, m1, a, null);
+      expect(off.statusCode).toBe(409);
+      expect(off.json()).toMatchObject({ error: 'per_document_off' });
+      const scan = await linkDocument(d, SUPPLIER_INN);
+      const inSection = await linkEdo(d, SUPPLIER_INN, scan);
+      expect((await recipientMode(d, true)).statusCode).toBe(200);
+      expect((await putEdo(d, inSection, a, null)).json()).toMatchObject({ error: 'document_not_linked' });
+      expect((await putEdo(d, randomUUID(), a, null)).statusCode).toBe(404);
+      const other = await twoEdoDelivery();
+      expect((await putEdo(d, other.m1, a, null)).statusCode).toBe(404);
+      const both = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/deliveries/${d}/contract`,
+        payload: { documentId: scan, edoMatchId: m1, contractId: a, replaceContractId: null },
+      });
+      expect(both.statusCode).toBe(400);
+      expect(await edoLinks(d)).toEqual([]);
+    });
+
+    it('подбор для УПД из ЭДО — по ИНН продавца; current — её договор', async () => {
+      const { d, m1, m2 } = await twoEdoDelivery();
+      const mine = await contract({ inn: SUPPLIER_INN });
+      const other = await contract({ inn: OTHER_INN });
+      await putEdo(d, m2, other, null);
+      const forM2 = (await candidates(d, `?edoMatchId=${m2}`)).json();
+      expect(forM2.context).toMatchObject({ documentId: null, edoMatchId: m2, supplierInns: [OTHER_INN], filteredBySupplier: true });
+      expect(forM2.items.map((x: { id: string; current: boolean }) => [x.id, x.current])).toEqual([[other, true]]);
+      const forM1 = (await candidates(d, `?edoMatchId=${m1}`)).json();
+      expect(forM1.items.map((x: { id: string; current: boolean }) => [x.id, x.current])).toEqual([[mine, false]]);
+      expect((await candidates(d, `?edoMatchId=${m1}&documentId=${randomUUID()}`)).statusCode).toBe(400);
+    });
+
+    it('выключение режима снимает договоры ЭДО (mode_off); удаление связи — document_unlinked', async () => {
+      const { d, m1, m2 } = await twoEdoDelivery();
+      const a = await contract();
+      const b = await contract();
+      await putEdo(d, m1, a, null);
+      await putEdo(d, m2, b, null);
+      const unlink = await app.inject({ method: 'DELETE', url: `/api/v1/deliveries/${d}/edo-matches/${m2}` });
+      expect(unlink.statusCode).toBe(200);
+      expect((await edoEvents(d)).at(-1)).toEqual(['unlinked', m2, null, null, b, 'document_unlinked']);
+      // Осталась одна УПД, режим включён — выключение проходит и снимает договор.
+      expect((await recipientMode(d, false)).statusCode).toBe(200);
+      expect(await edoLinks(d)).toEqual([]);
+      expect((await edoEvents(d)).at(-1)).toEqual(['unlinked', m1, null, null, a, 'mode_off']);
+      expect((await get(d)).json()).toMatchObject({ perDocument: false, edoDocuments: [] });
+    });
+
+    it('импорт каталога видит привязку договора к УПД из ЭДО', async () => {
+      const { d, m1 } = await twoEdoDelivery();
+      const a = await contract();
+      await putEdo(d, m1, a, null);
+      const [row] = await sql<{ display_id: string }[]>`SELECT display_id::text AS display_id FROM deliveries WHERE id = ${d}`;
+      const state = await readContractsState(app.db as never);
+      expect(state.linkedDeliveries.get(a)).toEqual([row!.display_id]);
     });
   });
 

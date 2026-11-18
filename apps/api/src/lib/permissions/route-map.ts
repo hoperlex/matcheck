@@ -371,6 +371,9 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['PATCH /api/v1/deliveries/:id/recipient-mode', DOCUMENT_RECIPIENT],
   ['PATCH /api/v1/deliveries/:id/sources/:docId/recipient', DOCUMENT_RECIPIENT],
   ['PATCH /api/v1/deliveries/:id/sources/:docId/purpose', st('operations.deliveries', 'review')],
+  // УПД из ЭДО без скана — документ того же режима (0152): те же права.
+  ['PATCH /api/v1/deliveries/:id/edo-matches/:matchId/recipient', DOCUMENT_RECIPIENT],
+  ['PATCH /api/v1/deliveries/:id/edo-matches/:matchId/purpose', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/dispatcher-check', st('operations.deliveries', 'review')],
   // Группы приёмок (рейсы одной поставки): «Проверять», как «Диспетчер» —
   // по умолчанию менеджер и мониторинг. Привязка УПД к группе идёт прежним

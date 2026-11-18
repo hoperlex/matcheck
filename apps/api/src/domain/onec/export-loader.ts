@@ -325,6 +325,20 @@ export async function loadDeliveryBundles(
     sha256: string | null;
     size_bytes: number | null;
     xml_available: boolean;
+    own_recipient: boolean;
+    own_purpose: boolean;
+    purpose: string | null;
+    contractor_id: string | null;
+    contractor_inn: string | null;
+    contractor_kpp: string | null;
+    contractor_name: string | null;
+    mol_id: string | null;
+    mol_name: string | null;
+    contract_onec_id: string | null;
+    contract_counterparty_onec_id: string | null;
+    contract_number: string | null;
+    contract_date: string | null;
+    contract_name: string | null;
   }>(
     ex,
     sql`
@@ -343,8 +357,20 @@ export async function loadDeliveryBundles(
              COALESCE(x.size_bytes, att.size_bytes) as size_bytes,
              CASE WHEN m.export_document_id IS NOT NULL
                   THEN (x.status = 'stored' AND x.s3_key IS NOT NULL)
-                  ELSE att.s3_key IS NOT NULL END as xml_available
+                  ELSE att.s3_key IS NOT NULL END as xml_available,
+             -- Свои получатель, признак и договор свободной УПД (0152).
+             m.own_recipient, m.own_purpose, m.purpose,
+             c.id::text as contractor_id, c.inn as contractor_inn, c.kpp as contractor_kpp,
+             c.name as contractor_name,
+             rp.id::text as mol_id, rp.full_name as mol_name,
+             sc.onec_id::text as contract_onec_id,
+             sc.counterparty_onec_id::text as contract_counterparty_onec_id,
+             sc.number as contract_number, sc.contract_date::text as contract_date,
+             sc.name as contract_name
         from delivery_edo_matches m
+        left join counterparties c on c.id = m.contractor_id
+        left join responsible_persons rp on rp.id = m.recipient_mol_id
+        left join supplier_contracts sc on sc.id = m.contract_id
         left join edo_export_documents x on x.id = m.export_document_id
         left join edo_accounts a on a.id = x.edo_account_id
         left join source_documents isd on isd.id = m.source_document_id
@@ -475,6 +501,20 @@ export async function loadDeliveryBundles(
       sha256: e.sha256,
       sizeBytes: e.size_bytes,
       xmlAvailable: e.xml_available,
+      ownRecipient: e.own_recipient,
+      contractor: cp(e.contractor_id, e.contractor_inn, e.contractor_kpp, e.contractor_name),
+      mol: mol(e.mol_id, e.mol_name),
+      ownPurpose: e.own_purpose,
+      purpose: e.purpose,
+      contract: e.contract_onec_id
+        ? {
+            onecId: e.contract_onec_id,
+            counterpartyOnecId: e.contract_counterparty_onec_id,
+            number: e.contract_number,
+            date: e.contract_date,
+            name: e.contract_name ?? '',
+          }
+        : null,
     }));
     out.set(h.id, {
       header,

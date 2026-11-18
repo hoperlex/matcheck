@@ -78,6 +78,13 @@ export const DeliveryDocumentContractSchema = z.object({
 });
 export type DeliveryDocumentContract = z.infer<typeof DeliveryDocumentContractSchema>;
 
+/** Свой договор УПД из ЭДО без скана (тот же режим, миграция 0152). */
+export const DeliveryEdoDocumentContractSchema = z.object({
+  edoMatchId: z.string().uuid(),
+  contract: DeliveryContractSchema,
+});
+export type DeliveryEdoDocumentContract = z.infer<typeof DeliveryEdoDocumentContractSchema>;
+
 export const DeliveryContractResponseSchema = z.object({
   /** Общий договор приёмки. */
   contract: DeliveryContractSchema.nullable(),
@@ -88,6 +95,11 @@ export const DeliveryContractResponseSchema = z.object({
    * Флаги договора документа считаются по ИНН поставщика этого документа.
    */
   documents: z.array(DeliveryDocumentContractSchema),
+  /**
+   * УПД из ЭДО без скана со своим договором. Optional — ответ прежней версии
+   * поля не несёт. Флаги — по ИНН продавца этой УПД.
+   */
+  edoDocuments: z.array(DeliveryEdoDocumentContractSchema).optional(),
   catalog: SupplierContractCatalogInfoSchema,
 });
 export type DeliveryContractResponse = z.infer<typeof DeliveryContractResponseSchema>;
@@ -95,6 +107,8 @@ export type DeliveryContractResponse = z.infer<typeof DeliveryContractResponseSc
 export const ContractCandidatesQuerySchema = z.object({
   /** Подбор для документа приёмки (по ИНН его поставщика); без него — общий договор. */
   documentId: z.string().uuid().optional(),
+  /** Подбор для УПД из ЭДО без скана (по ИНН продавца). Вместе с documentId — 400. */
+  edoMatchId: z.string().uuid().optional(),
   q: z.string().trim().max(200).optional(),
   /** 1 — все поставщики, а не только поставщик приёмки. */
   allSuppliers: z.enum(['0', '1']).optional(),
@@ -115,6 +129,8 @@ export type ContractCandidate = z.infer<typeof ContractCandidateSchema>;
 export const ContractCandidatesContextSchema = z.object({
   /** Документ, для которого подбор; null — общий договор приёмки. */
   documentId: z.string().uuid().nullable(),
+  /** УПД из ЭДО, для которой подбор; optional — прежний ответ поля не несёт. */
+  edoMatchId: z.string().uuid().nullable().optional(),
   /** ИНН поставщика приёмки или документа (без своих ИНН). */
   supplierInns: z.array(z.string()),
   supplierKnown: z.boolean(),
@@ -142,6 +158,8 @@ export type ContractCandidatesResponse = z.infer<typeof ContractCandidatesRespon
 export const SetDeliveryContractBodySchema = z.object({
   /** Договор документа (режим «Разные получатели»); null/нет — общий договор приёмки. */
   documentId: z.string().uuid().nullable().optional(),
+  /** Договор УПД из ЭДО без скана. Вместе с documentId — 400. */
+  edoMatchId: z.string().uuid().nullable().optional(),
   contractId: z.string().uuid(),
   replaceContractId: z.string().uuid().nullable(),
 });
@@ -151,6 +169,8 @@ export const UnsetDeliveryContractQuerySchema = z.object({
   expectedContractId: z.string().uuid(),
   /** Договор документа; без него — общий договор приёмки. */
   documentId: z.string().uuid().optional(),
+  /** Договор УПД из ЭДО без скана. Вместе с documentId — 400. */
+  edoMatchId: z.string().uuid().optional(),
 });
 export type UnsetDeliveryContractQuery = z.infer<typeof UnsetDeliveryContractQuerySchema>;
 

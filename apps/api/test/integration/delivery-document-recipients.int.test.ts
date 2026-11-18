@@ -28,6 +28,8 @@ suite('получатели документов приёмки (PostgreSQL)', {
   const contractorId = randomUUID();
   const molId = randomUUID();
   const docs = [randomUUID(), randomUUID()];
+  // Карточки УПД из ЭДО (старый путь — импорт Диадока) для связей без скана.
+  const edoDocs: string[] = [];
   let filledStatusId: string;
   const deliveryIds: string[] = [];
 
@@ -103,6 +105,7 @@ suite('получатели документов приёмки (PostgreSQL)', {
     if (!sql) return;
     await sql`DELETE FROM deliveries WHERE id IN ${sql(deliveryIds)}`;
     await sql`DELETE FROM source_documents WHERE id IN ${sql(docs)}`;
+    if (edoDocs.length) await sql`DELETE FROM source_documents WHERE id IN ${sql(edoDocs)}`;
     await sql`DELETE FROM sessions WHERE id = ${sessionId}`;
     await sql`DELETE FROM users WHERE id = ${managerId}`;
     await sql`DELETE FROM responsible_persons WHERE id = ${molId}`;
@@ -130,6 +133,27 @@ suite('получатели документов приёмки (PostgreSQL)', {
       payload,
     });
   const link = (docId: string) => `/sources/${docId}`;
+  const edoLink = (matchId: string) => `/edo-matches/${matchId}`;
+
+  /** УПД из ЭДО без скана (или в блоке скана) — строка delivery_edo_matches. */
+  async function linkEdo(deliveryId: string, sectionDocumentId: string | null = null) {
+    const docId = randomUUID();
+    edoDocs.push(docId);
+    await sql`INSERT INTO source_documents (id, kind, direction, status, origin, site_id, doc_number, doc_date)
+      VALUES (${docId}, 'upd', 'inbound', 'parsed', 'edo_diadoc', ${siteId}, ${`ЭДО-${docId.slice(0, 4)}`}, '2026-10-29')`;
+    const [m] = await sql<{ id: string }[]>`
+      INSERT INTO delivery_edo_matches (delivery_id, source_document_id, section_document_id, linked_by_user_id)
+      VALUES (${deliveryId}, ${docId}, ${sectionDocumentId}, ${managerId}) RETURNING id::text AS id`;
+    return m!.id;
+  }
+  const edoRow = async (matchId: string) =>
+    (
+      await sql<{ own_recipient: boolean; contractor_id: string | null; own_purpose: boolean; purpose: string | null }[]>`
+        SELECT own_recipient, contractor_id::text AS contractor_id, own_purpose, purpose
+        FROM delivery_edo_matches WHERE id = ${matchId}`
+    )[0]!;
+  const getDto = async (id: string) =>
+    (await app.inject({ method: 'GET', url: `/api/v1/deliveries/${id}` })).json();
 
   it('режим требует две связи; при одном оставшемся выключается и сбрасывает значения', async () => {
     const id = await makeDelivery(1);
@@ -417,5 +441,122 @@ suite('получатели документов приёмки (PostgreSQL)', {
       FROM deliveries d JOIN delivery_sources ds ON ds.delivery_id=d.id
       WHERE d.id=${id} GROUP BY d.id`;
     expect(row).toMatchObject({ recipients_per_document: false, own_count: 0 });
+  });
+  describe('УПД из ЭДО без скана — документ режима (0152)', () => {
+    it('0 сканов + 2 УПД из ЭДО (приёмка 22973): режим, получатель, признак, DTO одиночного и списка', async () => {
+      const id = await makeDelivery(0);
+      const m1 = await linkEdo(id);
+      expect((await getDto(id)).recipientDocumentCount).toBe(1);
+      expect((await patch(id, '/recipient-mode', { perDocument: true })).statusCode).toBe(422);
+      const m2 = await linkEdo(id);
+      expect((await patch(id, '/recipient-mode', { perDocument: true })).statusCode).toBe(200);
+      const dto = await getDto(id);
+      expect(dto.recipientDocumentCount).toBe(2);
+      expect(dto.edoDocuments).toEqual([
+        expect.objectContaining({ matchId: m1, operator: 'diadoc', docDate: '2026-10-29', ownRecipient: false }),
+        expect.objectContaining({ matchId: m2, ownRecipient: false }),
+      ]);
+      const res = await patch(id, `${edoLink(m1)}/recipient`, { contractorId });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().edoDocuments[0]).toMatchObject({
+        matchId: m1,
+        ownRecipient: true,
+        contractorId,
+        contractorName: 'Подрядчик документа',
+      });
+      // Подрядчику «Свои силы» нельзя — как у скана.
+      expect((await patch(id, `${edoLink(m1)}/purpose`, { purpose: 'own_forces' })).statusCode).toBe(422);
+      expect((await patch(id, `${edoLink(m2)}/purpose`, { purpose: 'tolling_act' })).statusCode).toBe(200);
+      expect(await edoRow(m2)).toMatchObject({ own_recipient: false, own_purpose: true, purpose: 'tolling_act' });
+      const list = (
+        await app.inject({ method: 'GET', url: `/api/v1/deliveries?siteIds=${siteId}&limit=200` })
+      ).json();
+      const row = list.items.find((item: { id: string }) => item.id === id);
+      expect(row.edoDocuments).toEqual((await getDto(id)).edoDocuments);
+      expect(row.recipientDocumentCount).toBe(2);
+    });
+
+    it('1 скан + 1 УПД из ЭДО: режим включается; УПД в блоке скана — 409, не считается документом', async () => {
+      const id = await makeDelivery(1);
+      const inSection = await linkEdo(id, docs[0]!);
+      expect((await getDto(id)).recipientDocumentCount).toBe(1);
+      expect((await patch(id, '/recipient-mode', { perDocument: true })).statusCode).toBe(422);
+      const free = await linkEdo(id);
+      expect((await patch(id, '/recipient-mode', { perDocument: true })).statusCode).toBe(200);
+      const inSectionRes = await patch(id, `${edoLink(inSection)}/recipient`, { none: true });
+      expect(inSectionRes.statusCode).toBe(409);
+      expect(inSectionRes.json()).toMatchObject({ error: 'edo_match_in_section' });
+      expect((await patch(id, `${edoLink(randomUUID())}/recipient`, { none: true })).statusCode).toBe(404);
+      expect((await patch(id, `${edoLink(free)}/recipient`, { recipientMolId: molId })).statusCode).toBe(200);
+      // МОЛ без своего признака → «Свои силы», как у скана.
+      expect(await edoRow(free)).toMatchObject({ own_recipient: true, own_purpose: true, purpose: 'own_forces' });
+      expect((await getDto(id)).edoDocuments.map((x: { matchId: string }) => x.matchId)).toEqual([free]);
+    });
+
+    it('удалили вторую УПД — режим и тумблер остаются; выключение проходит и сбрасывает ЭДО', async () => {
+      const id = await makeDelivery(1);
+      const free = await linkEdo(id);
+      await patch(id, '/recipient-mode', { perDocument: true });
+      await patch(id, `${edoLink(free)}/recipient`, { contractorId });
+      const second = await linkEdo(id);
+      const removed = await app.inject({ method: 'DELETE', url: `/api/v1/deliveries/${id}/edo-matches/${second}` });
+      expect(removed.statusCode).toBe(200);
+      await sql`DELETE FROM delivery_sources WHERE delivery_id=${id}`;
+      const dto = await getDto(id);
+      expect(dto).toMatchObject({ recipientsPerDocument: true, recipientDocumentCount: 1 });
+      expect((await patch(id, '/recipient-mode', { perDocument: false })).statusCode).toBe(200);
+      expect(await edoRow(free)).toMatchObject({ own_recipient: false, contractor_id: null, own_purpose: false });
+      expect((await getDto(id)).edoDocuments).toBeUndefined();
+    });
+
+    it('смена общих настроек пересчитывает признак УПД из ЭДО: PATCH общего признака и upsert планшета', async () => {
+      const id = await makeDelivery(0);
+      const m1 = await linkEdo(id);
+      await linkEdo(id);
+      await patch(id, '/recipient-mode', { perDocument: true });
+      await patch(id, `${edoLink(m1)}/recipient`, { contractorId });
+      // Общий признак «Свои силы» при ЭДО-подрядчике: у УПД — собственный NULL.
+      expect((await patch(id, '/purpose', { purpose: 'own_forces' })).statusCode).toBe(200);
+      expect(await edoRow(m1)).toMatchObject({ own_recipient: true, own_purpose: true, purpose: null });
+
+      const another = await makeDelivery(0);
+      const e1 = await linkEdo(another);
+      await linkEdo(another);
+      await patch(another, '/recipient-mode', { perDocument: true });
+      await patch(another, `${edoLink(e1)}/purpose`, { purpose: 'realization' });
+      // Путь планшета: общий получатель стал МОЛ — наследующая УПД получает «Свои силы».
+      const mobile = await app.inject({
+        method: 'POST',
+        url: '/api/v1/deliveries',
+        payload: { id: another, siteId, statusCode: 'filled', sourceDocumentIds: [], items: [], recipientMolId: molId },
+      });
+      expect(mobile.statusCode).toBe(200);
+      expect(await edoRow(e1)).toMatchObject({ own_recipient: false, own_purpose: true, purpose: 'own_forces' });
+    });
+
+    it('монитор без «Редактировать» меняет признак УПД из ЭДО, но не получателя', async () => {
+      const id = await makeDelivery(0);
+      const m1 = await linkEdo(id);
+      await linkEdo(id);
+      await patch(id, '/recipient-mode', { perDocument: true });
+      currentUser = { ...currentUser, role: 'monitor' };
+      expect((await patch(id, `${edoLink(m1)}/purpose`, { purpose: 'realization' })).statusCode).toBe(200);
+      expect((await patch(id, `${edoLink(m1)}/recipient`, { none: true })).statusCode).toBe(403);
+      monitorEditGranted = true;
+      expect((await patch(id, `${edoLink(m1)}/recipient`, { none: true })).statusCode).toBe(200);
+      currentUser = { ...currentUser, role: 'manager' };
+    });
+
+    it('выключение при своём признаке УПД из ЭДО требует review', async () => {
+      const id = await makeDelivery(0);
+      const m1 = await linkEdo(id);
+      await linkEdo(id);
+      await patch(id, '/recipient-mode', { perDocument: true });
+      await patch(id, `${edoLink(m1)}/purpose`, { purpose: 'realization' });
+      reviewAllowed = false;
+      expect((await patch(id, '/recipient-mode', { perDocument: false })).statusCode).toBe(403);
+      reviewAllowed = true;
+      expect((await patch(id, '/recipient-mode', { perDocument: false })).statusCode).toBe(200);
+    });
   });
 });

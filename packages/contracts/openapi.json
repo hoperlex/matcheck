@@ -817,6 +817,98 @@
               ]
             }
           },
+          "recipientDocumentCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "edoDocuments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "matchId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "operator": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "docNumber": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "docDate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ownRecipient": {
+                  "type": "boolean"
+                },
+                "contractorId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "contractorName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "recipientMolId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "recipientMolName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ownPurpose": {
+                  "type": "boolean"
+                },
+                "purpose": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "own_forces",
+                    "realization",
+                    "tolling_act",
+                    "contractor_materials",
+                    "realization_tolling"
+                  ]
+                }
+              },
+              "required": [
+                "matchId",
+                "operator",
+                "docNumber",
+                "docDate",
+                "ownRecipient",
+                "contractorId",
+                "contractorName",
+                "recipientMolId",
+                "recipientMolName",
+                "ownPurpose",
+                "purpose"
+              ]
+            }
+          },
           "confirmedByMolUserId": {
             "type": [
               "string",
@@ -2101,6 +2193,98 @@
                     ]
                   }
                 },
+                "recipientDocumentCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "edoDocuments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "matchId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "operator": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "docNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "docDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "ownRecipient": {
+                        "type": "boolean"
+                      },
+                      "contractorId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "contractorName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "recipientMolId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "recipientMolName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "ownPurpose": {
+                        "type": "boolean"
+                      },
+                      "purpose": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "own_forces",
+                          "realization",
+                          "tolling_act",
+                          "contractor_materials",
+                          "realization_tolling"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "matchId",
+                      "operator",
+                      "docNumber",
+                      "docDate",
+                      "ownRecipient",
+                      "contractorId",
+                      "contractorName",
+                      "recipientMolId",
+                      "recipientMolName",
+                      "ownPurpose",
+                      "purpose"
+                    ]
+                  }
+                },
                 "confirmedByMolUserId": {
                   "type": [
                     "string",
@@ -3149,6 +3333,98 @@
                   },
                   "required": [
                     "sourceDocumentId",
+                    "ownRecipient",
+                    "contractorId",
+                    "contractorName",
+                    "recipientMolId",
+                    "recipientMolName",
+                    "ownPurpose",
+                    "purpose"
+                  ]
+                }
+              },
+              "recipientDocumentCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "edoDocuments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "matchId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "operator": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "docNumber": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "docDate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "ownRecipient": {
+                      "type": "boolean"
+                    },
+                    "contractorId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "contractorName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "recipientMolId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "recipientMolName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "ownPurpose": {
+                      "type": "boolean"
+                    },
+                    "purpose": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "own_forces",
+                        "realization",
+                        "tolling_act",
+                        "contractor_materials",
+                        "realization_tolling"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "matchId",
+                    "operator",
+                    "docNumber",
+                    "docDate",
                     "ownRecipient",
                     "contractorId",
                     "contractorName",
@@ -10489,6 +10765,98 @@
                     },
                     "required": [
                       "sourceDocumentId",
+                      "ownRecipient",
+                      "contractorId",
+                      "contractorName",
+                      "recipientMolId",
+                      "recipientMolName",
+                      "ownPurpose",
+                      "purpose"
+                    ]
+                  }
+                },
+                "recipientDocumentCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "edoDocuments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "matchId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "operator": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "docNumber": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "docDate": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "ownRecipient": {
+                        "type": "boolean"
+                      },
+                      "contractorId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "contractorName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "recipientMolId": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "uuid"
+                      },
+                      "recipientMolName": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "ownPurpose": {
+                        "type": "boolean"
+                      },
+                      "purpose": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "own_forces",
+                          "realization",
+                          "tolling_act",
+                          "contractor_materials",
+                          "realization_tolling"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "matchId",
+                      "operator",
+                      "docNumber",
+                      "docDate",
                       "ownRecipient",
                       "contractorId",
                       "contractorName",

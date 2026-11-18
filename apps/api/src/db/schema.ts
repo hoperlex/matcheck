@@ -1868,11 +1868,59 @@ export const deliveryEdoMatches = pgTable(
     }),
     linkedByUserId: uuid('linked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
+    // Режим «Разные получатели по документам» (0152): свои получатель, признак
+    // и договор свободной УПД (без блока) — как у delivery_sources и
+    // delivery_contracts для загруженных документов. У связи в блоке пусто:
+    // она живёт настройками блока (CHECK section_own_chk).
+    ownRecipient: boolean('own_recipient').notNull().default(false),
+    contractorId: uuid('contractor_id').references(() => counterparties.id, {
+      onDelete: 'set null',
+    }),
+    recipientMolId: uuid('recipient_mol_id').references(() => responsiblePersons.id, {
+      onDelete: 'set null',
+    }),
+    ownPurpose: boolean('own_purpose').notNull().default(false),
+    purpose: varchar('purpose', { length: 24 }),
+    contractId: uuid('contract_id').references(() => supplierContracts.id, {
+      onDelete: 'restrict',
+    }),
+    contractLinkedByUserId: uuid('contract_linked_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    contractLinkedAt: timestamp('contract_linked_at', { withTimezone: true }),
   },
   (t) => [
     index('delivery_edo_matches_section_idx')
       .on(t.sectionDocumentId)
       .where(sql`${t.sectionDocumentId} is not null`),
+    index('delivery_edo_matches_contract_idx')
+      .on(t.contractId)
+      .where(sql`${t.contractId} is not null`),
+    check(
+      'delivery_edo_matches_own_recipient_chk',
+      sql`${t.ownRecipient} OR (${t.contractorId} IS NULL AND ${t.recipientMolId} IS NULL)`,
+    ),
+    check('delivery_edo_matches_own_purpose_chk', sql`${t.ownPurpose} OR ${t.purpose} IS NULL`),
+    check(
+      'delivery_edo_matches_recipient_chk',
+      sql`NOT (${t.contractorId} IS NOT NULL AND ${t.recipientMolId} IS NOT NULL)`,
+    ),
+    check(
+      'delivery_edo_matches_purpose_chk',
+      sql`${t.purpose} IN ('own_forces', 'realization', 'tolling_act', 'contractor_materials', 'realization_tolling')`,
+    ),
+    check(
+      'delivery_edo_matches_contractor_purpose_chk',
+      sql`NOT (${t.ownRecipient} AND ${t.contractorId} IS NOT NULL AND ${t.ownPurpose} AND ${t.purpose} = 'own_forces')`,
+    ),
+    check(
+      'delivery_edo_matches_contract_linked_chk',
+      sql`(${t.contractId} IS NULL) = (${t.contractLinkedAt} IS NULL)`,
+    ),
+    check(
+      'delivery_edo_matches_section_own_chk',
+      sql`${t.sectionDocumentId} IS NULL OR NOT (${t.ownRecipient} OR ${t.ownPurpose} OR ${t.contractId} IS NOT NULL)`,
+    ),
     uniqueIndex('delivery_edo_matches_source_unique')
       .on(t.deliveryId, t.sourceDocumentId)
       .where(sql`${t.sourceDocumentId} is not null`),
@@ -3155,6 +3203,8 @@ export const deliveryContractEvents = pgTable(
     kind: text('kind').$type<DeliveryContractEventKind>().notNull(),
     /** NULL — общий договор; иначе — договор документа (без FK, как delivery_id). */
     sourceDocumentId: uuid('source_document_id'),
+    /** Договор УПД из ЭДО без скана (0152); без FK — переживает удаление связи. */
+    edoMatchId: uuid('edo_match_id'),
     reason: text('reason').$type<DeliveryContractEventReason>(),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

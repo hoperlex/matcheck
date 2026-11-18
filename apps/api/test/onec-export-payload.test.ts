@@ -128,6 +128,27 @@ describe('buildDeliveryBody', () => {
     );
   });
 
+  it('УПД из ЭДО без блока: свои признак и договор, получатель общий (0152)', () => {
+    expect(body.edo[0]).toMatchObject({
+      recipient: { kind: 'contractor', inn: '7700000001' },
+      purpose: 'tolling_act',
+      contract: { number: 'ЭДО-57' },
+    });
+    // ЭДО внутри блока документа живёт настройками документа — своих полей нет.
+    expect(body.groups[0]!.document!.edo[0]).not.toHaveProperty('recipient');
+    expect(body.groups[0]!.document!.edo[0]).not.toHaveProperty('ownRecipient');
+  });
+
+  it('УПД из ЭДО без блока без своего договора наследует общий', () => {
+    const bundle = fullBundle();
+    bundle.edo[1]!.contract = null;
+    bundle.edo[1]!.ownPurpose = false;
+    bundle.edo[1]!.purpose = null;
+    const b = buildDeliveryBody(bundle, '2026-11-11T10:00:00.000000Z');
+    expect(b.edo[0]!.contract!.number).toBe('СУ-ЗИЛ/25-40');
+    expect(b.edo[0]!.purpose).toBe(b.purpose);
+  });
+
   it('общая УПД: соседи без самой приёмки; возможные дубли', () => {
     expect(body.groups[0]!.document!.sharedWith).toEqual([
       { id: '44444444-4444-4444-8444-444444444444', displayId: 24510 },

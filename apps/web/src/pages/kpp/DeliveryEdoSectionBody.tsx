@@ -468,6 +468,7 @@ export function DeliveryEdoOnlyBlocks({
   shared,
   factRows = [],
   otherEdoOnDelivery = false,
+  extra,
 }: {
   deliveryId: string;
   entries: readonly EdoItemsEntry[];
@@ -479,6 +480,11 @@ export function DeliveryEdoOnlyBlocks({
   factRows?: readonly FactRow[];
   /** У приёмки есть и другие УПД из ЭДО — их факт в тех же позициях. */
   otherEdoOnDelivery?: boolean;
+  /**
+   * Правая часть заголовка блока — как sectionExtra у блоков скана: в режиме
+   * «Разные получатели» там получатель, признак и договор этой УПД (0152).
+   */
+  extra?: (match: LinkedEdoDocument) => ReactNode;
 }) {
   const [openKeys, setOpenKeys] = useAutoOpenKeys(entries.map((entry) => entry.match.id));
   const { openPdf, drawer } = useEdoPdf(deliveryId, photos, onOpenXml);
@@ -493,9 +499,20 @@ export function DeliveryEdoOnlyBlocks({
         items={entries.map((entry) => {
           const operator = entry.data?.label.operator ?? entry.match.operator;
           const number = entry.data?.label.docNumber ?? entry.match.docNumber;
+          const extraContent = extra?.(entry.match);
           return {
             key: entry.match.id,
             label: `Материалы · УПД № ${number ?? 'без номера'} из ЭДО · ${edoOperatorLabel(operator)}${edoCountLabel([entry])}`,
+            // Клик по чипам не должен сворачивать блок — как у блоков скана
+            // (OperationItemsSections): всплывающие окна живут в портале, но их
+            // события всё равно всплывают сюда.
+            extra: extraContent ? (
+              <span onClick={(e) => e.stopPropagation()}>
+                <Space size={4} wrap style={{ justifyContent: 'flex-end' }}>
+                  {extraContent}
+                </Space>
+              </span>
+            ) : undefined,
             children: (() => {
               const facts = shared?.get(entry.match.id);
               return facts ? (

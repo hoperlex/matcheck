@@ -39,6 +39,7 @@ export function LinkContractModal({
   open,
   deliveryId,
   documentId = null,
+  edoMatchId = null,
   documentLabel = null,
   current,
   onClose,
@@ -47,6 +48,8 @@ export function LinkContractModal({
   deliveryId: string | null;
   /** Договор документа (режим «Разные получатели»); null — общий договор приёмки. */
   documentId?: string | null;
+  /** Договор УПД из ЭДО без скана (тот же режим, 0152); documentId тогда null. */
+  edoMatchId?: string | null;
   /** «УПД № …» — для заголовка окна договора документа. */
   documentLabel?: string | null;
   /** Договор этой области, который сейчас видит человек. */
@@ -72,10 +75,17 @@ export function LinkContractModal({
 
   const offset = (page - 1) * PAGE_SIZE;
   const candidates = useQuery({
-    queryKey: [...keys.candidates, documentId ?? 'general', query, allSuppliers, offset],
+    queryKey: [
+      ...keys.candidates,
+      edoMatchId ? `edo:${edoMatchId}` : (documentId ?? 'general'),
+      query,
+      allSuppliers,
+      offset,
+    ],
     queryFn: () => {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-      if (documentId) params.set('documentId', documentId);
+      if (edoMatchId) params.set('edoMatchId', edoMatchId);
+      else if (documentId) params.set('documentId', documentId);
       if (query) params.set('q', query);
       if (allSuppliers) params.set('allSuppliers', '1');
       return api.get<ContractCandidatesResponse>(`/deliveries/${deliveryId}/contract-candidates?${params.toString()}`);
@@ -95,7 +105,7 @@ export function LinkContractModal({
     mutationFn: (body: { contractId: string; replaceContractId: string | null }) =>
       api.put<DeliveryContractResponse>(`/deliveries/${deliveryId}/contract`, {
         ...body,
-        ...(documentId ? { documentId } : {}),
+        ...(edoMatchId ? { edoMatchId } : documentId ? { documentId } : {}),
       }),
     onSuccess: (data) => {
       queryClient.setQueryData(keys.contract, data);
@@ -252,10 +262,10 @@ export function LinkContractModal({
         <Typography.Text type="secondary" data-testid="contract-modal-context">
           {ctx
             ? ctx.supplierKnown
-              ? `Договоры поставщика ${documentId ? 'документа' : 'приёмки'} (ИНН ${ctx.supplierInns.join(', ')})${
+              ? `Договоры поставщика ${documentId || edoMatchId ? 'документа' : 'приёмки'} (ИНН ${ctx.supplierInns.join(', ')})${
                   ctx.filteredBySupplier ? '' : ' — сверху, ниже все остальные'
                 }. Сверху — договоры объекта ${ctx.siteCode ?? 'приёмки'}.`
-              : `Поставщик ${documentId ? 'документа' : 'приёмки'} не определён — ищите по номеру, адресу или ИНН.`
+              : `Поставщик ${documentId || edoMatchId ? 'документа' : 'приёмки'} не определён — ищите по номеру, адресу или ИНН.`
             : null}{' '}
           {importedText}
         </Typography.Text>

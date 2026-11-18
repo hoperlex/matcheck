@@ -10,7 +10,7 @@
 // CHECK в базе на эту пару намеренно нет: путь записи получателя, который
 // здесь не учтён, отдал бы планшету 500 на upsert и встал бы в его очереди.
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import {
   DeliveryPurposeSchema,
   deliveryRecipientKind,
@@ -19,12 +19,55 @@ import {
   type DocumentRecipientState,
   type DeliveryPurpose,
 } from '@matcheck/contracts';
-import { deliveries, deliverySources } from '../../db/schema.js';
+import { deliveries, deliveryEdoMatches, deliverySources } from '../../db/schema.js';
 
 export type RecipientPair = { contractorId: string | null; recipientMolId: string | null };
 export type GeneralRecipient = RecipientPair & { purpose: DeliveryPurpose | null };
 
-/** Зовётся только после блокировки deliveries: порядок блокировок всегда одинаков. */
+/** Собственные настройки документа — те же поля у скана и у УПД из ЭДО. */
+export function documentStateOf(row: {
+  ownRecipient: boolean;
+  contractorId: string | null;
+  recipientMolId: string | null;
+  ownPurpose: boolean;
+  purpose: string | null;
+}): DocumentRecipientState {
+  return {
+    ownRecipient: row.ownRecipient,
+    contractorId: row.contractorId,
+    recipientMolId: row.recipientMolId,
+    ownPurpose: row.ownPurpose,
+    purpose: DeliveryPurposeSchema.nullable().parse(row.purpose),
+  };
+}
+
+/**
+ * Свободные УПД из ЭДО приёмки (без блока скана) под FOR UPDATE — документы
+ * режима «Разные получатели» наравне с delivery_sources (0152). Брать после
+ * блокировки deliveries и delivery_sources: порядок блокировок всегда
+ * deliveries → delivery_sources → delivery_edo_matches.
+ */
+export async function lockFreeEdoMatches(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+  deliveryId: string,
+): Promise<(typeof deliveryEdoMatches.$inferSelect)[]> {
+  return await tx
+    .select()
+    .from(deliveryEdoMatches)
+    .where(
+      and(eq(deliveryEdoMatches.deliveryId, deliveryId), isNull(deliveryEdoMatches.sectionDocumentId)),
+    )
+    .orderBy(deliveryEdoMatches.id)
+    .for('update');
+}
+
+/**
+ * Зовётся только после блокировки deliveries: порядок блокировок всегда
+ * одинаков. Пересчитывает признаки всех документов режима — сканов и
+ * свободных УПД из ЭДО: иначе смена общего признака (в том числе upsert
+ * планшета) оставила бы УПД из ЭДО «подрядчик + Свои силы».
+ */
 export async function reconcileLinkedDocumentPurposes(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx: any,
@@ -44,13 +87,7 @@ export async function reconcileLinkedDocumentPurposes(
     .orderBy(deliverySources.sourceDocumentId)
     .for('update');
   for (const row of rows) {
-    const before: DocumentRecipientState = {
-      ownRecipient: row.ownRecipient,
-      contractorId: row.contractorId,
-      recipientMolId: row.recipientMolId,
-      ownPurpose: row.ownPurpose,
-      purpose: DeliveryPurposeSchema.nullable().parse(row.purpose),
-    };
+    const before = documentStateOf(row);
     const after = reconcileDocumentPurpose(previous, next, before, before);
     if (after.ownPurpose !== before.ownPurpose || after.purpose !== before.purpose) {
       await tx
@@ -62,6 +99,16 @@ export async function reconcileLinkedDocumentPurposes(
             eq(deliverySources.sourceDocumentId, row.sourceDocumentId),
           ),
         );
+    }
+  }
+  for (const row of await lockFreeEdoMatches(tx, deliveryId)) {
+    const before = documentStateOf(row);
+    const after = reconcileDocumentPurpose(previous, next, before, before);
+    if (after.ownPurpose !== before.ownPurpose || after.purpose !== before.purpose) {
+      await tx
+        .update(deliveryEdoMatches)
+        .set({ ownPurpose: after.ownPurpose, purpose: after.purpose })
+        .where(eq(deliveryEdoMatches.id, row.id));
     }
   }
 }

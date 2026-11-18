@@ -15,6 +15,7 @@ import { OperationDocumentValidationAlert } from '../shared/OperationDocumentVal
 import { DELIVERY_PURPOSE_LABELS } from '../../shared/utils/deliveryPurpose';
 import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 import { DocumentRecipientChips } from './DocumentRecipientChips';
+import { edoOperatorLabel } from '../shared/edoOperator';
 
 type Row = z.infer<typeof DeliveryListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -346,7 +347,8 @@ export function DeliveryViewModal({
             <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
               Материалы ({items.length})
             </Typography.Title>
-            {d.recipientsPerDocument && (d.sourceDocuments?.length ?? 0) > 0 ? (
+            {d.recipientsPerDocument &&
+            ((d.sourceDocuments?.length ?? 0) > 0 || (d.edoDocuments?.length ?? 0) > 0) ? (
               <Collapse
                 size="small"
                 items={[
@@ -368,6 +370,29 @@ export function DeliveryViewModal({
                     ) : null,
                     children: renderItemsTable(
                       items.filter((item) => item.sourceDocumentId === doc.id),
+                    ),
+                  })),
+                  // УПД из ЭДО без скана — документы того же режима (0152). Данные
+                  // — из строки списка (то же право просмотра, что у окна), а не
+                  // из чтения ЭДО: оно требует права правки. Строк факта у такой
+                  // УПД нет (они в блоке «без документа»), поэтому строка-заголовок.
+                  ...(d.edoDocuments ?? []).map((edo) => ({
+                    key: `edo:${edo.matchId}`,
+                    label: `Материалы · УПД № ${edo.docNumber ?? 'без номера'} из ЭДО · ${edoOperatorLabel(edo.operator)}`,
+                    collapsible: 'disabled' as const,
+                    showArrow: false,
+                    extra: (
+                      <DocumentRecipientChips
+                        delivery={d}
+                        edoMatchId={edo.matchId}
+                        canEditRecipient={false}
+                        canPickContractor={false}
+                        canEditPurpose={false}
+                        mols={[]}
+                        molsLoading={false}
+                        onRecipient={() => {}}
+                        onPurpose={() => {}}
+                      />
                     ),
                   })),
                   ...(items.some(

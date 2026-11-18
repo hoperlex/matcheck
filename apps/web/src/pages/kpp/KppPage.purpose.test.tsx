@@ -166,6 +166,9 @@ const MOL = '99999999-9999-4999-8999-999999999999';
 let current: Delivery;
 const EMPTY_CONTRACTS = { contract: null, perDocument: false, documents: [], catalog: { total: 0, importedAt: null } };
 let contractResponse: unknown = EMPTY_CONTRACTS;
+// Привязанные УПД из ЭДО (`GET …/edo-matches`).
+const NO_EDO = { items: [] as unknown[] };
+let edoMatchesResponse: { items: unknown[] } = NO_EDO;
 
 function route(url: string): unknown {
   if (url === `/deliveries/${ID}`) return current;
@@ -184,6 +187,19 @@ function route(url: string): unknown {
   }
   if (url.includes('supplier-orders')) return { items: [], sync: { enabled: false } };
   if (url.endsWith('/contract')) return contractResponse;
+  if (url === `/deliveries/${ID}/edo-matches`) return edoMatchesResponse;
+  if (url.includes('/edo-matches/') && url.endsWith('/items')) {
+    const matchId = url.split('/')[4]!;
+    return {
+      matchId,
+      source: 'export',
+      label: { operator: 'diadoc', docNumber: `ЭДО-${matchId.slice(0, 2)}`, docDate: '2026-10-29', correctionNumber: null },
+      state: 'ready',
+      totals: null,
+      reasons: [],
+      items: [],
+    };
+  }
   return { items: [], total: 0 };
 }
 
@@ -225,6 +241,7 @@ afterEach(() => {
   vi.clearAllMocks();
   authUser.role = 'monitor';
   contractResponse = EMPTY_CONTRACTS;
+  edoMatchesResponse = NO_EDO;
   mocks.deniedCapabilities.clear();
 });
 
@@ -334,6 +351,134 @@ describe('режим получателей по УПД', () => {
     expect(screen.getByRole('button', { name: '+ Договор (общий)' })).toBeTruthy();
 
     // Выключение: подтверждение считает и документ со своим договором.
+    const label = screen.getByText('Разные получатели по документам');
+    fireEvent.click(label.parentElement!.querySelector('[role="switch"]')!);
+    expect(await screen.findByText('У 1 документов свой получатель, признак или договор — сбросить?')).toBeTruthy();
+  });
+});
+
+describe('режим получателей: УПД из ЭДО без скана (0152)', () => {
+  const E1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const E2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const linked = (id: string, docNumber: string) => ({
+    id,
+    documentId: id,
+    source: 'export',
+    docNumber,
+    docDate: '2026-10-29',
+    supplierName: null,
+    supplierInn: null,
+    totalSum: null,
+    linkedAt: '2026-11-18T08:25:36.542Z',
+    sectionDocumentId: null,
+    alsoIn: [],
+    alsoInCount: 0,
+    operator: 'diadoc',
+  });
+  const edoDoc = (matchId: string, docNumber: string, extra: Record<string, unknown> = {}) => ({
+    matchId,
+    operator: 'diadoc',
+    docNumber,
+    docDate: '2026-10-29',
+    ownRecipient: false,
+    contractorId: null,
+    contractorName: null,
+    recipientMolId: null,
+    recipientMolName: null,
+    ownPurpose: false,
+    purpose: null,
+    ...extra,
+  });
+
+  it('тумблер есть при двух УПД из ЭДО без сканов (приёмка 22973)', async () => {
+    authUser.role = 'manager';
+    current = { ...delivery(3, [], []), recipientDocumentCount: 2 } as Delivery;
+    vi.mocked(api.patch).mockResolvedValue({ ...current, recipientsPerDocument: true });
+    renderCard();
+    const label = await screen.findByText('Разные получатели по документам');
+    const switchEl = () => label.parentElement!.querySelector('[role="switch"]') as HTMLButtonElement;
+    await waitFor(() => expect(switchEl().disabled).toBe(false));
+    fireEvent.click(switchEl());
+    await waitFor(() =>
+      expect(api.patch).toHaveBeenCalledWith(`/deliveries/${ID}/recipient-mode`, { perDocument: true }),
+    );
+  });
+
+  it('одна УПД: при выключенном режиме тумблера нет, при включённом — есть (чтобы выключить)', async () => {
+    current = { ...delivery(3, [], [sourceDoc(FIRST, 'УПД-1')]), recipientDocumentCount: 1 } as Delivery;
+    renderCard();
+    await readyPurposeButton();
+    expect(screen.queryByText('Разные получатели по документам')).toBeNull();
+    cleanup();
+    current = {
+      ...delivery(3, [], [sourceDoc(FIRST, 'УПД-1')]),
+      recipientsPerDocument: true,
+      recipientDocumentCount: 1,
+    } as Delivery;
+    renderCard();
+    expect(await screen.findByText('Разные получатели по документам')).toBeTruthy();
+  });
+
+  it('в блоках УПД из ЭДО — получатель, признак и договор; признак уходит в edo-matches', async () => {
+    authUser.role = 'manager';
+    current = {
+      ...delivery(3, [], []),
+      recipientsPerDocument: true,
+      recipientDocumentCount: 2,
+      edoDocuments: [
+        edoDoc(E1, '201/21126982-2332', { ownRecipient: true, contractorId: CONTRACTOR, contractorName: 'ООО КС' }),
+        edoDoc(E2, '201/21128196-2'),
+      ],
+    } as Delivery;
+    edoMatchesResponse = { items: [linked(E1, '201/21126982-2332'), linked(E2, '201/21128196-2')] };
+    contractResponse = {
+      contract: null,
+      perDocument: true,
+      documents: [],
+      edoDocuments: [
+        {
+          edoMatchId: E1,
+          contract: {
+            id: '77777777-7777-4777-8777-777777777777',
+            onecId: '77777777-7777-4777-8777-777777777778',
+            counterpartyName: 'ЭЛЕКТРОТЕХМОНТАЖ АО',
+            counterpartyInn: '7716951747',
+            name: 'Договор УПД из ЭДО',
+            number: '202/ЦМос3/4622-2025-ДОМ56',
+            contractDate: '2025-01-09',
+            kind: 'supplier',
+            objectText: null,
+            siteStatus: 'exact',
+            siteCodes: ['Д56'],
+            missingSince: null,
+            linkedAt: '2026-11-18T10:00:00.000Z',
+            linkedByName: null,
+            supplierMatch: true,
+            siteMatch: 'match',
+            kindChanged: false,
+            missing: false,
+          },
+        },
+      ],
+      catalog: { total: 5, importedAt: '2026-11-10T14:13:45.088Z' },
+    };
+    vi.mocked(api.patch).mockResolvedValue(current);
+    renderCard();
+    expect(await screen.findByText(/Подрядчик: ООО КС/)).toBeTruthy();
+    // Свой договор у первой УПД — чип, у второй своего нет — «+ Договор».
+    const chips = await screen.findAllByTestId('contract-chip');
+    expect(chips.map((c) => c.textContent)).toEqual([expect.stringContaining('202/ЦМос3/4622-2025-ДОМ56')]);
+    expect(await screen.findAllByTestId('document-contract-add')).toHaveLength(1);
+    // Признак второй УПД — PATCH на её связь, не на скан.
+    const purposeTags = await screen.findAllByText(/Признак: как у приёмки/);
+    fireEvent.click(purposeTags[purposeTags.length - 1]!);
+    fireEvent.click(await screen.findByText('2 Реализация'));
+    await waitFor(() =>
+      expect(api.patch).toHaveBeenCalledWith(`/deliveries/${ID}/edo-matches/${E2}/purpose`, {
+        purpose: 'realization',
+      }),
+    );
+    // Выключение: подтверждение считает УПД из ЭДО со своим получателем и договором.
     const label = screen.getByText('Разные получатели по документам');
     fireEvent.click(label.parentElement!.querySelector('[role="switch"]')!);
     expect(await screen.findByText('У 1 документов свой получатель, признак или договор — сбросить?')).toBeTruthy();

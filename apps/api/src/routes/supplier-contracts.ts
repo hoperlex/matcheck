@@ -59,18 +59,30 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
     return d;
   }
 
-  /** Договор области (общий или документа) — для ответа 409 contract_changed. */
-  async function scopeContract(deliveryId: string, siteId: string, documentId: string | null) {
+  /** Область договора: общий, документа-скана или УПД из ЭДО без скана (0152). */
+  type Scope = { documentId: string | null; edoMatchId: string | null };
+
+  /** Договор области — для ответа 409 contract_changed. */
+  async function scopeContract(deliveryId: string, siteId: string, scope: Scope) {
     const all = await getDeliveryContract(app.db, { id: deliveryId, siteId });
-    if (documentId === null) return all.contract;
-    return all.documents.find((d) => d.documentId === documentId)?.contract ?? null;
+    if (scope.edoMatchId !== null) {
+      return (all.edoDocuments ?? []).find((d) => d.edoMatchId === scope.edoMatchId)?.contract ?? null;
+    }
+    if (scope.documentId === null) return all.contract;
+    return all.documents.find((d) => d.documentId === scope.documentId)?.contract ?? null;
   }
 
-  function documentIdOf(req: { body?: unknown; query?: unknown }): string | null {
-    const fromBody = (req.body as { documentId?: string | null } | undefined)?.documentId;
-    const fromQuery = (req.query as { documentId?: string } | undefined)?.documentId;
-    return fromBody ?? fromQuery ?? null;
+  /** Область из тела или query. Документ и УПД из ЭДО сразу — null (400). */
+  function scopeOf(source: { documentId?: string | null; edoMatchId?: string | null }): Scope | null {
+    const documentId = source.documentId ?? null;
+    const edoMatchId = source.edoMatchId ?? null;
+    if (documentId !== null && edoMatchId !== null) return null;
+    return { documentId, edoMatchId };
   }
+  const AMBIGUOUS = {
+    error: 'scope_ambiguous',
+    message: 'Укажите либо документ, либо УПД из ЭДО',
+  } as const;
 
   function notify(deliveryId: string, siteId: string) {
     publishEvent(app, {
@@ -134,6 +146,7 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
         ...result,
         contract: result.contract ? narrow(result.contract) : null,
         documents: result.documents.map((d) => ({ ...d, contract: narrow(d.contract) })),
+        edoDocuments: (result.edoDocuments ?? []).map((d) => ({ ...d, contract: narrow(d.contract) })),
         catalog: { ...result.catalog, total: 0 },
       };
     },
@@ -146,16 +159,23 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
       schema: {
         params: DeliveryParams,
         querystring: ContractCandidatesQuerySchema,
-        response: { 200: ContractCandidatesResponseSchema, 404: ErrorResponseSchema },
+        response: {
+          200: ContractCandidatesResponseSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+        },
       },
     },
     async (req, reply) => {
+      const scope = scopeOf(req.query);
+      if (!scope) return reply.code(400).send(AMBIGUOUS);
       const delivery = await visibleDelivery(req.params.id, req.user);
       if (!delivery) return reply.code(404).send({ error: 'not_found' });
       return findContractCandidates(app.db, {
         deliveryId: delivery.id,
         deliverySiteId: delivery.siteId,
-        documentId: req.query.documentId ?? null,
+        documentId: scope.documentId,
+        edoMatchId: scope.edoMatchId,
         q: req.query.q,
         allSuppliers: req.query.allSuppliers === '1',
         limit: req.query.limit,
@@ -173,15 +193,19 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
         body: SetDeliveryContractBodySchema,
         response: {
           200: DeliveryContractResponseSchema,
+          400: ErrorResponseSchema,
           404: ErrorResponseSchema,
           409: ConflictSchema,
         },
       },
     },
     async (req, reply) => {
+      const scope = scopeOf(req.body);
+      if (!scope) return reply.code(400).send(AMBIGUOUS);
       const result = await setDeliveryContract(app.db, {
         deliveryId: req.params.id,
-        documentId: req.body.documentId ?? null,
+        documentId: scope.documentId,
+        edoMatchId: scope.edoMatchId,
         contractId: req.body.contractId,
         replaceContractId: req.body.replaceContractId,
         userId: req.user?.id ?? null,
@@ -192,7 +216,7 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
           return reply.code(409).send({
             error: 'contract_changed',
             message: result.message,
-            current: await scopeContract(req.params.id, result.siteId, documentIdOf(req)),
+            current: await scopeContract(req.params.id, result.siteId, scope),
           });
         }
         return reply.code(409).send({ error: result.error, message: result.message });
@@ -211,15 +235,19 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
         querystring: UnsetDeliveryContractQuerySchema,
         response: {
           200: DeliveryContractResponseSchema,
+          400: ErrorResponseSchema,
           404: ErrorResponseSchema,
           409: ConflictSchema,
         },
       },
     },
     async (req, reply) => {
+      const scope = scopeOf(req.query);
+      if (!scope) return reply.code(400).send(AMBIGUOUS);
       const result = await unsetDeliveryContract(app.db, {
         deliveryId: req.params.id,
-        documentId: req.query.documentId ?? null,
+        documentId: scope.documentId,
+        edoMatchId: scope.edoMatchId,
         expectedContractId: req.query.expectedContractId,
         userId: req.user?.id ?? null,
       });
@@ -229,7 +257,7 @@ export async function supplierContractsRoutes(rawApp: FastifyInstance): Promise<
           return reply.code(409).send({
             error: 'contract_changed',
             message: result.message,
-            current: await scopeContract(req.params.id, result.siteId, documentIdOf(req)),
+            current: await scopeContract(req.params.id, result.siteId, scope),
           });
         }
         return reply.code(409).send({ error: result.error, message: result.message });

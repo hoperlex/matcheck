@@ -17,15 +17,24 @@
  * меняет, а любое изменение значения — меняет. Id строк приёмки в ядро не
  * входят: они пересоздаются при каждом сохранении.
  *
- * Ядро меняется только новой версией (HASH_VERSION) с сохранением старой
- * функции: подтверждение 1С несёт версию, сравнение идёт в версии сохранённого
- * хеша.
+ * Ядро меняется только новой версией (HASH_VERSION): подтверждение 1С несёт
+ * версию, и хеш другой версии считается изменением (exportStateOf, detection),
+ * то есть смена версии один раз возвращает в очередь всё выгруженное.
+ *
+ * История версий:
+ *  - v1 — исходное ядро;
+ *  - v2 (18.11.2026, миграция 0152) — у УПД из ЭДО уровня приёмки свои
+ *    получатель, признак и договор (режим «Разные получатели по документам»).
+ *    На момент смены выгрузка на бою выключена, delivery_onec_exports пуста —
+ *    повторной рассылки не было.
  */
 import { createHash } from 'node:crypto';
 import type { OnecDeliveryBody } from './export-payload.js';
 
-export const HASH_VERSION = 1;
-export const SUPPORTED_HASH_VERSIONS: readonly number[] = [1];
+export const HASH_VERSION = 2;
+// v1 остаётся допустимой в подтверждении: подтверждение, отправленное до
+// выката, сохранится и вернёт приёмку в очередь как изменённую.
+export const SUPPORTED_HASH_VERSIONS: readonly number[] = [1, 2];
 
 /** Поля, по которым 1С сопоставляет и проводит документ. */
 export const CORE_PATHS: readonly string[] = [
@@ -52,6 +61,16 @@ export const CORE_PATHS: readonly string[] = [
   'edo[].exportDocumentId',
   'edo[].sourceDocumentId',
   'edo[].sha256',
+  // v2: УПД из ЭДО к приёмке целиком — документ режима «Разные получатели».
+  'edo[].recipient.kind',
+  'edo[].recipient.inn',
+  'edo[].recipient.kpp',
+  'edo[].recipient.molId',
+  'edo[].purpose',
+  'edo[].contract.onecId',
+  'edo[].contract.counterpartyOnecId',
+  'edo[].contract.number',
+  'edo[].contract.date',
   'groups[].groupKey',
   'groups[].document.id',
   'groups[].document.kind',
@@ -120,6 +139,8 @@ export const EXCLUDED_PATHS: Readonly<Record<string, string>> = {
   'edo[].sizeBytes': EDO_BY_ID,
   'edo[].xmlAvailable': 'доступность файла, не содержимое',
   'edo[].xmlPath': 'адрес, не содержимое',
+  'edo[].recipient.name': NAME,
+  'edo[].contract.name': NAME,
   'groups[].document.portalDuplicates': 'сведения о других карточках портала',
   'groups[].document.supplier.name': NAME,
   'groups[].document.recipient.name': NAME,

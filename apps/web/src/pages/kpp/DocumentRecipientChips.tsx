@@ -22,10 +22,17 @@ export type DocumentRecipientPatch =
   | { inherit: true };
 export type DocumentPurposePatch = { purpose: DeliveryPurpose } | { inherit: true };
 
+/**
+ * Документ режима «Разные получатели»: связанный скан (`docId`) или УПД из ЭДО
+ * без скана (`edoMatchId`, миграция 0152) — ровно одно из двух.
+ */
+type DocumentTarget = { docId: string; edoMatchId?: never } | { edoMatchId: string; docId?: never };
+
 /** Чипы связанного УПД. Без прав показывают те же действующие значения текстом. */
 export function DocumentRecipientChips({
   delivery,
   docId,
+  edoMatchId,
   canEditRecipient,
   canPickContractor,
   canEditPurpose,
@@ -34,9 +41,8 @@ export function DocumentRecipientChips({
   molsLoading,
   onRecipient,
   onPurpose,
-}: {
+}: DocumentTarget & {
   delivery: Delivery;
-  docId: string;
   canEditRecipient: boolean;
   canPickContractor: boolean;
   canEditPurpose: boolean;
@@ -46,7 +52,12 @@ export function DocumentRecipientChips({
   onRecipient: (patch: DocumentRecipientPatch) => void;
   onPurpose: (patch: DocumentPurposePatch) => void;
 }) {
-  const own = delivery.documentRecipients?.find((x) => x.sourceDocumentId === docId);
+  // У скана в documentRecipients только документы со своими значениями, у УПД
+  // из ЭДО в edoDocuments — все свободные; форма полей одна.
+  const own =
+    edoMatchId !== undefined
+      ? delivery.edoDocuments?.find((x) => x.matchId === edoMatchId)
+      : delivery.documentRecipients?.find((x) => x.sourceDocumentId === docId);
   const doc = {
     ownRecipient: own?.ownRecipient ?? false,
     contractorId: own?.contractorId ?? null,

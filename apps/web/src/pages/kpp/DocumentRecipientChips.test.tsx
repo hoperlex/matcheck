@@ -111,4 +111,59 @@ describe('чипы получателя и признака УПД', () => {
     fireEvent.click(screen.getByText('2 Реализация'));
     expect(onPurpose).toHaveBeenCalledWith({ purpose: 'realization' });
   });
+
+  it('УПД из ЭДО без скана (0152): значения из edoDocuments, не из записей сканов', async () => {
+    const EDO = '44444444-4444-4444-8444-444444444444';
+    const delivery = {
+      ...base,
+      // Запись скана с тем же id не должна подхватиться для УПД из ЭДО.
+      documentRecipients: [
+        {
+          sourceDocumentId: EDO,
+          ownRecipient: true,
+          contractorId: CONTRACTOR,
+          contractorName: 'Чужой скан',
+          recipientMolId: null,
+          recipientMolName: null,
+          ownPurpose: false,
+          purpose: null,
+        },
+      ],
+      edoDocuments: [
+        {
+          matchId: EDO,
+          operator: 'diadoc',
+          docNumber: '201/21126982-2332',
+          docDate: '2026-10-29',
+          ownRecipient: true,
+          contractorId: CONTRACTOR,
+          contractorName: 'ООО КС',
+          recipientMolId: null,
+          recipientMolName: null,
+          ownPurpose: true,
+          purpose: 'tolling_act',
+        },
+      ],
+    } as unknown as Delivery;
+    const onPurpose = vi.fn();
+    render(
+      <DocumentRecipientChips
+        delivery={delivery}
+        edoMatchId={EDO}
+        canEditRecipient={false}
+        canPickContractor={false}
+        canEditPurpose
+        mols={[]}
+        molsLoading={false}
+        onRecipient={vi.fn()}
+        onPurpose={onPurpose}
+      />,
+    );
+    expect(screen.getByText(/Получатель: Подрядчик: ООО КС/)).toBeTruthy();
+    expect(screen.queryByText(/Чужой скан/)).toBeNull();
+    fireEvent.click(screen.getByText(/Признак: Давальческий акт/));
+    await waitFor(() => expect(screen.getAllByRole('menuitem').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByText('2 Реализация'));
+    expect(onPurpose).toHaveBeenCalledWith({ purpose: 'realization' });
+  });
 });
