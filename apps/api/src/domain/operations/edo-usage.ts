@@ -45,11 +45,14 @@ function uuidArray(values: readonly string[]) {
 /**
  * Использование документов по ключу `edoUsageKey`. Документа без других
  * приёмок в ответе нет.
+ *
+ * `excludeDeliveryId = null` — считаются все приёмки, включая ту, из которой
+ * спрашивают: так список узнаёт, на скольких приёмках стоит УПД.
  */
 export async function edoDocumentUsage(
   db: Db,
   docs: readonly EdoDocumentRef[],
-  excludeDeliveryId: string,
+  excludeDeliveryId: string | null,
 ): Promise<Map<string, EdoUsage>> {
   const usage = new Map<string, EdoUsage>();
   const exportIds = [...new Set(docs.filter((d) => d.source === 'export').map((d) => d.id))];
@@ -132,7 +135,7 @@ export async function edoDocumentUsage(
     select l.source, l.id, d.id as delivery_id, d.display_id
       from links l
       join deliveries d on d.id = l.delivery_id
-     where l.delivery_id <> ${excludeDeliveryId}
+     where ${excludeDeliveryId === null ? drSql`true` : drSql`l.delivery_id <> ${excludeDeliveryId}`}
      order by l.source, l.id, d.display_id
   `);
 

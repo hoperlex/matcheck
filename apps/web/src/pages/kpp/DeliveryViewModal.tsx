@@ -1,4 +1,4 @@
-import { Button, Collapse, Empty, Modal, Space, Table, Tag, Typography } from 'antd';
+import { Button, Collapse, Empty, Modal, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
 import type { z } from 'zod';
 import type { DeliveryListResponseSchema } from '@matcheck/contracts';
@@ -16,6 +16,11 @@ import { DELIVERY_PURPOSE_LABELS } from '../../shared/utils/deliveryPurpose';
 import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 import { DocumentRecipientChips } from './DocumentRecipientChips';
 import { edoOperatorLabel } from '../shared/edoOperator';
+import {
+  edoHeaderSumHint,
+  edoScanMismatch,
+  sharedEdoText,
+} from '../../shared/utils/edoSummaryView';
 
 type Row = z.infer<typeof DeliveryListResponseSchema>['items'][number];
 type Item = Row['items'][number];
@@ -28,6 +33,8 @@ export type DeliveryViewData = {
   docNumber: string | null;
   docKindLabel: string | null;
   docTotalSum: number | null;
+  /** «Сумма», «Сумма по ЭДО» или «Сумма по документам» — откуда цифра. */
+  docTotalLabel?: string;
 };
 
 /**
@@ -50,6 +57,9 @@ export function DeliveryViewModal({
   // администратором edit обязан открывать форму и отсюда.
   const canEdit = usePermissions().can('operations.deliveries', 'edit');
   const d = data?.delivery;
+  // УПД из ЭДО: пометки расхождения со сканом и общей УПД — как в шапке карточки.
+  const edoMismatch = d?.edoSummary ? edoScanMismatch(d.edoSummary) : null;
+  const edoShared = d?.edoSummary ? sharedEdoText(d.edoSummary) : null;
   const before = (d?.photos ?? []).filter((p) => p.stage === 'before');
   const after = (d?.photos ?? []).filter((p) => p.stage === 'after');
   const items = d?.items ?? [];
@@ -147,7 +157,7 @@ export function DeliveryViewModal({
               {d.status.label}
             </Tag>
             <ReviewBadge state={d.reviewState} />
-            {d.sourceDocumentIds.length === 0 && (
+            {d.sourceDocumentIds.length === 0 && !d.edoSummary && (
               <Tag style={{ marginInlineEnd: 0 }} color="gold">
                 Без документа
               </Tag>
@@ -171,7 +181,22 @@ export function DeliveryViewModal({
               <Tag style={{ marginInlineEnd: 0 }}>Авто: {d.vehiclePlate}</Tag>
             ) : null}
             {data.docTotalSum != null ? (
-              <Tag style={{ marginInlineEnd: 0 }}>Сумма: {formatMoneyRu(data.docTotalSum)}</Tag>
+              <Tooltip title={d.edoSummary ? edoHeaderSumHint(d.edoSummary) : undefined}>
+                <Tag
+                  style={{ marginInlineEnd: 0 }}
+                  color={d.edoSummary?.ambiguous ? 'warning' : undefined}
+                >
+                  {data.docTotalLabel ?? 'Сумма'}: {formatMoneyRu(data.docTotalSum)}
+                  {edoShared ? ` · ${edoShared}` : ''}
+                </Tag>
+              </Tooltip>
+            ) : null}
+            {edoMismatch ? (
+              <Tooltip title={edoMismatch.hint}>
+                <Tag style={{ marginInlineEnd: 0 }} color="orange">
+                  {edoMismatch.text}
+                </Tag>
+              </Tooltip>
             ) : null}
             {d.inTransit ? (
               <Tag style={{ marginInlineEnd: 0 }} color="orange">

@@ -94,11 +94,5 @@ export function sharedFactTotals(
   return factTotals([...current, ...others.flatMap((delivery) => delivery.rows)]);
 }
 
-/** «на 2 приёмки», «на 5 приёмок», «на 21 приёмку». */
-export function deliveriesAccusative(n: number): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return 'приёмку';
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'приёмки';
-  return 'приёмок';
-}
+/** «на 2 приёмки», «на 5 приёмок», «на 21 приёмку» — общая с шапкой и списком. */
+export { deliveriesAccusative } from '../../shared/utils/edoSummaryView';

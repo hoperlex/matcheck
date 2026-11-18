@@ -1,8 +1,16 @@
 import { useState } from 'react';
-import { Button, Checkbox, Popconfirm, Popover, Space, Tag, Typography } from 'antd';
-import { DisconnectOutlined, EyeOutlined } from '@ant-design/icons';
-import type { OperationSourceDocument } from '@matcheck/contracts';
+import { Button, Checkbox, Popconfirm, Popover, Space, Tag, Tooltip, Typography } from 'antd';
+import { DisconnectOutlined, EyeOutlined, WarningOutlined } from '@ant-design/icons';
+import type { EdoSummary, OperationSourceDocument } from '@matcheck/contracts';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import {
+  edoDateSources,
+  edoHeaderSumHint,
+  edoHeaderSumLabel,
+  edoScanMismatch,
+  sharedEdoText,
+  unpairedScanDocuments,
+} from '../../shared/utils/edoSummaryView';
 import {
   groupDocumentsByKind,
   summarizeDates,
@@ -21,10 +29,17 @@ import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
  * Раньше здесь стоял один документ — `sourceDocumentIds[0]`, и у приёмки из
  * четырёх УПД в шапке был номер одной бумаги, а «Сумма» показывала её итог
  * вместо итога поставки.
+ *
+ * С УПД из ЭДО (`edoSummary`) номер, дата и сумма — по ЭДО: бумага, у которой
+ * есть пара в ЭДО, из чипов уходит (остаётся в поповере с «Отвязать»), а
+ * расхождение итога со сканом видно отдельной пометкой.
  */
 
 /** Сколько номеров показываем в чипе до того, как свернуть остальные в «+N». */
 const INLINE_NUMBERS = 3;
+
+/** Ключ поповера чипа «УПД из ЭДО» — не совпадает ни с одной подписью вида. */
+const EDO_GROUP = '__edo__';
 
 function docLabel(doc: OperationSourceDocument): string {
   return doc.docNumber ?? '— без номера —';
@@ -42,6 +57,7 @@ export function OperationDocumentsChips({
   itemCountByDocumentId,
   onOpenOriginal,
   unlinkPending = false,
+  edoSummary,
 }: {
   /** Связанные документы операции. */
   documents: OperationSourceDocument[];
@@ -58,6 +74,8 @@ export function OperationDocumentsChips({
    */
   onOpenOriginal?: (document: OperationSourceDocument) => void;
   unlinkPending?: boolean;
+  /** УПД из ЭДО приёмки (DTO `edoSummary`); нет — шапка по документам скана. */
+  edoSummary?: EdoSummary;
 }) {
   // Какой поповер раскрыт. Состояние на ГРУППУ, а не общий флаг: чипов
   // столько, сколько видов документов, и один boolean раскрыл бы поповеры
@@ -72,7 +90,7 @@ export function OperationDocumentsChips({
   // прошлой отвязки на следующую не переносится.
   const [deleteItems, setDeleteItems] = useState(true);
 
-  if (documents.length === 0) return null;
+  if (documents.length === 0 && !edoSummary) return null;
 
   const unlinkDescription = (count: number) =>
     count > 0 ? (
@@ -86,9 +104,25 @@ export function OperationDocumentsChips({
       'Документ вернётся в список свободных.'
     );
 
-  const docDate = summarizeDates(documents, 'docDate');
+  // С ЭДО чипы номеров — по УПД из ЭДО и бумагам без пары; поповер со всеми
+  // бумагами и «Отвязать» остаётся прежним.
+  const chipDocuments = edoSummary ? unpairedScanDocuments(edoSummary, documents) : documents;
+  const docDate = summarizeDates(
+    edoSummary ? edoDateSources(edoSummary, documents) : documents,
+    'docDate',
+  );
   const expectedDate = summarizeDates(documents, 'expectedDate');
-  const money = sumDocumentTotals(documents);
+  const money = edoSummary
+    ? edoSummary.header.total === null
+      ? null
+      : {
+          total: edoSummary.header.total,
+          known: edoSummary.header.known,
+          count: edoSummary.header.count,
+        }
+    : sumDocumentTotals(documents);
+  const mismatch = edoSummary ? edoScanMismatch(edoSummary) : null;
+  const shared = edoSummary ? sharedEdoText(edoSummary) : null;
   const partial = (known: number, total: number) =>
     known < total ? ` · у ${known} из ${total}` : '';
 
@@ -160,9 +194,39 @@ export function OperationDocumentsChips({
     </Space>
   );
 
+  const edoNumbers = edoSummary?.documents.map((doc) => doc.docNumber ?? 'без номера') ?? [];
+  const edoChip = edoSummary && (
+    <Tag
+      color="blue"
+      style={{ marginInlineEnd: 0, cursor: documents.length ? 'pointer' : 'default' }}
+    >
+      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+        УПД из ЭДО:
+      </Typography.Text>{' '}
+      <Typography.Text strong style={{ fontSize: 12 }}>
+        {edoNumbers.slice(0, INLINE_NUMBERS).join(', ')}
+        {edoNumbers.length > INLINE_NUMBERS ? ` +${edoNumbers.length - INLINE_NUMBERS}` : ''}
+      </Typography.Text>
+    </Tag>
+  );
+
   return (
     <>
-      {groupDocumentsByKind(documents).map((group) => {
+      {edoChip &&
+        (documents.length > 0 ? (
+          <Popover
+            content={details}
+            trigger="click"
+            placement="bottomLeft"
+            open={openGroup === EDO_GROUP}
+            onOpenChange={(visible) => setOpenGroup(visible ? EDO_GROUP : null)}
+          >
+            {edoChip}
+          </Popover>
+        ) : (
+          edoChip
+        ))}
+      {groupDocumentsByKind(chipDocuments).map((group) => {
         const numbers = group.documents.map(docLabel);
         const shown = numbers.slice(0, INLINE_NUMBERS).join(', ');
         const restCount = numbers.length - INLINE_NUMBERS;
@@ -199,11 +263,29 @@ export function OperationDocumentsChips({
           {partial(expectedDate.known, expectedDate.total)}
         </Tag>
       )}
-      {money && (
+      {money && !edoSummary && (
         <Tag style={{ marginInlineEnd: 0 }}>
           {documents.length > 1 ? 'Сумма по документам' : 'Сумма'}: {formatMoneyRu(money.total)}
           {money.known < money.count ? ` · сумма указана у ${money.known} из ${money.count}` : ''}
         </Tag>
+      )}
+      {money && edoSummary && (
+        <Tooltip title={edoHeaderSumHint(edoSummary)}>
+          <Tag style={{ marginInlineEnd: 0 }} color={edoSummary.ambiguous ? 'warning' : undefined}>
+            {edoSummary.ambiguous && <WarningOutlined style={{ marginInlineEnd: 4 }} />}
+            {edoHeaderSumLabel(edoSummary)}: {formatMoneyRu(money.total)}
+            {money.known < money.count ? ` · сумма указана у ${money.known} из ${money.count}` : ''}
+            {shared ? ` · ${shared}` : ''}
+          </Tag>
+        </Tooltip>
+      )}
+      {mismatch && (
+        <Tooltip title={mismatch.hint}>
+          <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+            <WarningOutlined style={{ marginInlineEnd: 4 }} />
+            {mismatch.text}
+          </Tag>
+        </Tooltip>
       )}
     </>
   );

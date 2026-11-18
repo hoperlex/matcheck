@@ -42,7 +42,8 @@ export type DateSummary = {
  * бы выдумкой.
  */
 export function summarizeDates(
-  documents: OperationSourceDocument[],
+  // Только даты: шапка с УПД из ЭДО сводит и их даты, а не только документы скана.
+  documents: ReadonlyArray<Pick<OperationSourceDocument, 'docDate' | 'expectedDate'>>,
   field: 'docDate' | 'expectedDate',
 ): DateSummary | null {
   const values = documents.map((d) => d[field]).filter((v): v is string => v !== null && v !== '');

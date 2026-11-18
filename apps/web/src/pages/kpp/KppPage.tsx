@@ -1196,6 +1196,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-candidates', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+      // Суммы списка считаются по УПД из ЭДО — список обновляется сразу, а не
+      // при следующем запросе.
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
     },
     onError: (err: Error) => setLinkEdoError(err.message),
   });
@@ -1211,6 +1214,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-matches', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['delivery-edo-candidates', deliveryId] });
       void queryClient.invalidateQueries({ queryKey: ['deliveries', deliveryId] });
+      // Суммы списка считаются по УПД из ЭДО — список обновляется сразу, а не
+      // при следующем запросе.
+      void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -2297,13 +2303,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     Принято: {formatMolDate(loadedDelivery.arrivedAt)}
                   </Tag>
                 </>
-              ) : linkedDocuments.length > 0 ? (
+              ) : linkedDocuments.length > 0 || loadedDelivery?.edoSummary ? (
                 <>
                   {/* Все связанные документы поставки: номера через запятую по
                       видам, даты и сумма — по всем сразу. Полный список с
-                      кнопкой «Отвязать» открывается кликом по чипу. */}
+                      кнопкой «Отвязать» открывается кликом по чипу. С УПД из
+                      ЭДО номер, дата и сумма — по ЭДО (edoSummary). */}
                   <OperationDocumentsChips
                     documents={linkedDocuments}
+                    edoSummary={loadedDelivery?.edoSummary}
                     onUnlink={
                       canUnlinkUpd
                         ? (doc, { deleteItems }) => unlinkUpd.mutate({ doc, deleteItems })

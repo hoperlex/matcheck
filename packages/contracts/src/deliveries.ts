@@ -250,6 +250,63 @@ export const DeliveryGroupSummarySchema = z.object({
 });
 export type DeliveryGroupSummary = z.infer<typeof DeliveryGroupSummarySchema>;
 
+/**
+ * УПД из ЭДО/СБИС приёмки и её пара среди документов скана
+ * (`domain/operations/edo-effective-totals.ts`).
+ */
+export const EdoSummaryDocumentSchema = z.object({
+  matchId: z.string().uuid(),
+  source: z.enum(['import', 'export']),
+  documentId: z.string().uuid(),
+  operator: z.string(),
+  docNumber: z.string().nullable(),
+  /** YYYY-MM-DD. */
+  docDate: z.string().nullable(),
+  totalSum: z.number().nullable(),
+  vatSum: z.number().nullable(),
+  sectionDocumentId: z.string().uuid().nullable(),
+  pairedSourceDocumentId: z.string().uuid().nullable(),
+  pairedBy: z.enum(['section', 'number', 'sum_date']).nullable(),
+  /** Сколько разных приёмок с этой УПД, включая эту. */
+  deliveryCount: z.number().int().positive(),
+  /** Строки УПД заменили факт в списке и выгрузке. */
+  replacesFact: z.boolean(),
+});
+export type EdoSummaryDocument = z.infer<typeof EdoSummaryDocumentSchema>;
+
+/**
+ * Номер, дата и суммы приёмки по УПД из ЭДО — одно правило для шапки
+ * карточки, окна просмотра, колонок списка и выгрузки в Excel. Есть только у
+ * приёмки с привязанной УПД из ЭДО.
+ *
+ * `header` — итоги документов С НДС (как чип «Сумма» шапки); `list` — без НДС
+ * и НДС отдельно (как колонки списка «Сумма» и «Сумма НДС»).
+ */
+export const EdoSummarySchema = z.object({
+  documents: z.array(EdoSummaryDocumentSchema),
+  unpairedLinkedDocumentIds: z.array(z.string().uuid()),
+  ambiguous: z.boolean(),
+  sharedMax: z.number().int().positive(),
+  header: z.object({
+    total: z.number().nullable(),
+    known: z.number().int().nonnegative(),
+    count: z.number().int().nonnegative(),
+    source: z.enum(['edo', 'mixed']),
+    comparison: z.object({ edo: z.number(), scan: z.number(), mismatch: z.boolean() }).nullable(),
+  }),
+  list: z.object({
+    exVat: z.number().nullable(),
+    vat: z.number().nullable(),
+    source: z.enum(['edo', 'mixed', 'fact']),
+    edoExVat: z.number().nullable(),
+    edoVat: z.number().nullable(),
+    factExVat: z.number().nullable(),
+    factVat: z.number().nullable(),
+    edoMissing: z.number().int().nonnegative(),
+  }),
+});
+export type EdoSummary = z.infer<typeof EdoSummarySchema>;
+
 export const DeliverySchema = z.object({
   id: z.string().uuid(),
   // Короткий человекочитаемый id для столбца «id» в Принятых и
@@ -336,6 +393,12 @@ export const DeliverySchema = z.object({
   // только по linked) и блоки материалов. Optional по той же причине, что и
   // блок выше: /sync поле не собирает, мобильный клиент его игнорирует.
   sourceDocuments: z.array(OperationSourceDocumentSchema).optional(),
+  /**
+   * Номер, дата и суммы по УПД из ЭДО (см. EdoSummarySchema). Нет поля — у
+   * приёмки нет УПД из ЭДО. Optional: /sync его не собирает, мобильный клиент
+   * игнорирует.
+   */
+  edoSummary: EdoSummarySchema.optional(),
   /**
    * Разбор документа нашёл расхождение или подозрение, и операция ещё открыта.
    *

@@ -43,6 +43,15 @@ import {
 } from '@matcheck/contracts';
 import { computeItemsTotal, computeItemsVatSum } from '../lib/operation-sums.js';
 import {
+  computeEdoSummary,
+  type EdoSummaryInput,
+} from '../domain/operations/edo-effective-totals.js';
+import {
+  loadEdoSummaryInputs,
+  loadScanDocumentInputs,
+} from '../domain/operations/edo-summary-load.js';
+import { planExportLines, readEdoLinesForExport } from '../domain/operations/edo-export-lines.js';
+import {
   counterparties,
   deliveries,
   deliveryEdoMatches,
@@ -541,6 +550,8 @@ function assembleDeliveryDto(
   // Свободные УПД из ЭДО: считаются всегда (порог тумблера), список отдаётся
   // только при включённом режиме.
   freeEdoDocuments: EdoDocumentRecipient[] = [],
+  // Все УПД из ЭДО приёмки — номер, дата и суммы по ЭДО (edo-effective-totals).
+  edoInputs: EdoSummaryInput[] = [],
 ) {
   const d = r.d;
   const s = r.s;
@@ -567,6 +578,11 @@ function assembleDeliveryDto(
     volumeConfidence: i.volumeConfidence as 'low' | 'medium' | 'high' | null,
     groupName: i.groupName,
   }));
+  const edoSummary = computeEdoSummary({
+    edo: edoInputs,
+    documents: sourceDocumentSummaries,
+    items: mappedItems,
+  });
   const mappedPhotos = photos.map((p) => ({
     id: p.id,
     kind: p.kind,
@@ -643,6 +659,8 @@ function assembleDeliveryDto(
     itemsVatSum: computeItemsVatSum(mappedItems),
     primarySourceDocument: primaryDoc,
     sourceDocuments: sourceDocumentSummaries,
+    // Нет УПД из ЭДО — нет и поля: шапка и список считают как раньше.
+    ...(edoSummary ? { edoSummary } : {}),
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
   };
@@ -702,6 +720,7 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
   const coveredCounts = countCoveredDocumentItems(items);
   const documentRecipients = await loadDocumentRecipients(app, [id]);
   const freeEdoDocuments = await loadFreeEdoDocuments(app, [id]);
+  const edoInputs = await loadEdoSummaryInputs(app.db, [id]);
 
   return assembleDeliveryDto(
     r,
@@ -721,6 +740,7 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
     }),
     documentRecipients.get(id) ?? [],
     freeEdoDocuments.get(id) ?? [],
+    edoInputs.get(id) ?? [],
   );
 }
 
@@ -756,6 +776,7 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
     .orderBy(deliverySources.deliveryId, deliverySources.sourceDocumentId);
   const documentRecipients = await loadDocumentRecipients(app, ids);
   const freeEdoDocuments = await loadFreeEdoDocuments(app, ids);
+  const edoInputs = await loadEdoSummaryInputs(app.db, ids);
 
   const headerById = new Map<string, DeliveryHeaderRow>();
   for (const r of headerRows) headerById.set(r.d.id, r);
@@ -932,6 +953,7 @@ async function buildDeliveryDtosBatch(app: any, ids: string[], viewerRole?: stri
         }),
         documentRecipients.get(id) ?? [],
         freeEdoDocuments.get(id) ?? [],
+        edoInputs.get(id) ?? [],
       ),
     );
   }
@@ -2543,6 +2565,43 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           for (const c of counts) photoCounts.set(c.deliveryId, c.count);
         }
 
+        // УПД из ЭДО: итог строки приёмки — как в списке (edoSummary.list), под
+        // ним — строки самой УПД вместо факта её пары (edo-export-lines.ts).
+        // Приёмки без ЭДО выгружаются ровно как раньше.
+        const edoInputs = await loadEdoSummaryInputs(app.db, finalIds);
+        const edoDeliveryIds = finalIds.filter((id) => edoInputs.has(id));
+        const scanDocs = await loadScanDocumentInputs(
+          app.db,
+          srcLinks.filter((l) => edoInputs.has(l.deliveryId)),
+          edoDeliveryIds.flatMap((id) =>
+            (itemsByDelivery.get(id) ?? []).map((it) => ({
+              deliveryId: id,
+              sourceDocumentId: it.sourceDocumentId,
+            })),
+          ),
+        );
+        const edoSummaries = new Map<string, NonNullable<ReturnType<typeof computeEdoSummary>>>();
+        for (const id of edoDeliveryIds) {
+          const summary = computeEdoSummary({
+            edo: edoInputs.get(id) ?? [],
+            documents: scanDocs.get(id) ?? [],
+            items: itemsByDelivery.get(id) ?? [],
+          });
+          if (summary) edoSummaries.set(id, summary);
+        }
+        const edoLines = await readEdoLinesForExport(
+          app.db,
+          req.log,
+          [...edoSummaries.values()].flatMap((summary) => summary.documents),
+        );
+        // Получатель и признак строк УПД без блока — с её строки связи (0152).
+        const freeEdoSettings = await loadFreeEdoDocuments(app, edoDeliveryIds);
+        const scanNumberById = new Map(
+          [...scanDocs.values()].flat().map((doc) => [doc.id, doc.docNumber]),
+        );
+        const SOURCE_LABELS = { edo: 'ЭДО', mixed: 'ЭДО + факт', fact: 'факт' } as const;
+        const OPERATOR_LABELS: Record<string, string> = { sbis: 'СБИС', diadoc: 'Диадок' };
+
         const ExcelJS = (await import('exceljs')).default;
         const wb = new ExcelJS.Workbook();
         const ws = wb.addWorksheet('Принятые', {
@@ -2576,6 +2635,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           { header: 'Признак', key: 'purpose', width: 24 },
           { header: 'Диспетчер', key: 'dispatcher', width: 30 },
           { header: 'Получатель (по документу)', key: 'documentRecipient', width: 32 },
+          // Откуда сумма и строки: УПД из ЭДО или факт приёмки. Последней — по
+          // той же причине, что колонки выше.
+          { header: 'Источник', key: 'source', width: 34 },
         ];
         const headerRow = ws.getRow(1);
         headerRow.font = { bold: true };
@@ -2594,13 +2656,17 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           const linkedByDocument = new Map(
             (linksByDelivery.get(d.id) ?? []).map((link) => [link.sourceDocumentId, link]),
           );
-          const recipientFor = (link: SrcLink | undefined) => {
+          type RecipientSource = Pick<
+            SrcLink,
+            'ownRecipient' | 'contractorName' | 'recipientMolName' | 'ownPurpose' | 'purpose'
+          >;
+          const recipientFor = (link: RecipientSource | undefined) => {
             const own = d.recipientsPerDocument && link?.ownRecipient;
             const contractorName = own ? link?.contractorName : r.contractorName;
             const molName = own ? link?.recipientMolName : r.recipientMolName;
             return contractorName ?? (molName ? `МОЛ: ${molName}` : '');
           };
-          const purposeFor = (link: SrcLink | undefined) => {
+          const purposeFor = (link: RecipientSource | undefined) => {
             const value = d.recipientsPerDocument && link?.ownPurpose ? link.purpose : d.purpose;
             return value ? (DELIVERY_PURPOSE_LABELS[value as DeliveryPurpose] ?? value) : '';
           };
@@ -2618,6 +2684,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               docVatSum = (docVatSum ?? 0) + Number(it.vatSum);
             }
           }
+          const edoSummary = edoSummaries.get(d.id);
+          // № УПД с ЭДО — номера УПД из ЭДО и документов скана без пары, как в шапке.
+          const edoDocNumber = edoSummary
+            ? [
+                ...edoSummary.documents.map((doc) => doc.docNumber ?? 'без номера'),
+                ...edoSummary.unpairedLinkedDocumentIds.map(
+                  (docId) => scanNumberById.get(docId) ?? 'без номера',
+                ),
+              ].join(', ')
+            : null;
           const siteFull =
             r.siteCode && r.siteName ? `${r.siteCode} · ${r.siteName}` : (r.siteName ?? '');
           const docRow = ws.addRow({
@@ -2626,7 +2702,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             status: r.statusLabel,
             vehiclePlate: d.vehiclePlate ?? '',
             arrivedAt: fmtDateTimeRu(d.arrivedAt),
-            docNumber: r.docNumber ?? '',
+            docNumber: edoDocNumber ?? r.docNumber ?? '',
             supplierName: r.supplierName ?? '',
             contractorName: r.contractorNameResolved ?? '',
             siteName: siteFull,
@@ -2646,8 +2722,9 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             qtyActual: null,
             unit: '',
             price: null,
-            vatSum: docVatSum,
-            sum: docSum,
+            vatSum: edoSummary ? edoSummary.list.vat : docVatSum,
+            sum: edoSummary ? edoSummary.list.exVat : docSum,
+            source: SOURCE_LABELS[edoSummary?.list.source ?? 'fact'],
           });
           docRow.font = { bold: true };
           docRow.getCell('vatSum').numFmt = MONEY_FMT;
@@ -2658,7 +2735,48 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             fgColor: { argb: 'FFF7F7F7' },
           };
 
-          for (const it of items) {
+          const writeItemRow = (row: {
+            idx: number | null;
+            nameRaw: string;
+            qtyPlanned: number | null;
+            qtyActual: number | null;
+            unit: string | null;
+            price: number | null;
+            vatSum: number | null;
+            sum: number | null;
+            link: RecipientSource | undefined;
+            source: string;
+          }) => {
+            const itemRow = ws.addRow({
+              idx: row.idx,
+              displayId: null,
+              status: '',
+              vehiclePlate: '',
+              arrivedAt: '',
+              docNumber: '',
+              supplierName: '',
+              contractorName: '',
+              siteName: '',
+              photos: null,
+              nameRaw: row.nameRaw,
+              qtyPlanned: row.qtyPlanned,
+              qtyActual: row.qtyActual,
+              unit: row.unit,
+              price: row.price,
+              vatSum: row.vatSum,
+              sum: row.sum,
+              purpose: purposeFor(row.link),
+              documentRecipient: recipientFor(row.link),
+              source: row.source,
+            });
+            itemRow.outlineLevel = 1;
+            itemRow.getCell('qtyPlanned').numFmt = QTY_FMT;
+            itemRow.getCell('qtyActual').numFmt = QTY_FMT;
+            itemRow.getCell('price').numFmt = MONEY_FMT;
+            itemRow.getCell('vatSum').numFmt = MONEY_FMT;
+            itemRow.getCell('sum').numFmt = MONEY_FMT;
+          };
+          const writeFactRow = (it: (typeof items)[number], source: string) => {
             const qtyP =
               it.qtyPlanned != null && it.qtyPlanned !== '' ? Number(it.qtyPlanned) : null;
             const qtyA = it.qtyActual != null && it.qtyActual !== '' ? Number(it.qtyActual) : null;
@@ -2671,17 +2789,8 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               Number.isFinite(price)
                 ? qtyForRowTotal * price
                 : null;
-            const itemRow = ws.addRow({
+            writeItemRow({
               idx: it.lineNo,
-              displayId: null,
-              status: '',
-              vehiclePlate: '',
-              arrivedAt: '',
-              docNumber: '',
-              supplierName: '',
-              contractorName: '',
-              siteName: '',
-              photos: null,
               nameRaw: it.nameRaw,
               qtyPlanned: qtyP,
               qtyActual: qtyA,
@@ -2689,19 +2798,64 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               price,
               vatSum: it.vatSum != null && it.vatSum !== '' ? Number(it.vatSum) : null,
               sum: rowSum,
-              purpose: purposeFor(
-                it.sourceDocumentId ? linkedByDocument.get(it.sourceDocumentId) : undefined,
-              ),
-              documentRecipient: recipientFor(
-                it.sourceDocumentId ? linkedByDocument.get(it.sourceDocumentId) : undefined,
-              ),
+              link: it.sourceDocumentId ? linkedByDocument.get(it.sourceDocumentId) : undefined,
+              source,
             });
-            itemRow.outlineLevel = 1;
-            itemRow.getCell('qtyPlanned').numFmt = QTY_FMT;
-            itemRow.getCell('qtyActual').numFmt = QTY_FMT;
-            itemRow.getCell('price').numFmt = MONEY_FMT;
-            itemRow.getCell('vatSum').numFmt = MONEY_FMT;
-            itemRow.getCell('sum').numFmt = MONEY_FMT;
+          };
+
+          if (!edoSummary) {
+            for (const it of items) writeFactRow(it, 'факт');
+          } else {
+            const freeByMatch = new Map(
+              (freeEdoSettings.get(d.id) ?? []).map((edo) => [edo.matchId, edo]),
+            );
+            const edoLabel = (doc: (typeof edoSummary.documents)[number]) =>
+              `ЭДО (${OPERATOR_LABELS[doc.operator] ?? doc.operator}) № ${doc.docNumber ?? 'без номера'}`;
+            for (const line of planExportLines(edoSummary, items, edoLines)) {
+              if (line.kind === 'fact') {
+                writeFactRow(line.item, line.note ? `факт: ${line.note}` : 'факт');
+                continue;
+              }
+              // Получатель строк УПД — от блока, к которому она привязана, или
+              // со строки самой связи (у связи в блоке своих настроек нет).
+              const link: RecipientSource | undefined = line.doc.sectionDocumentId
+                ? linkedByDocument.get(line.doc.sectionDocumentId)
+                : freeByMatch.get(line.doc.matchId);
+              if (line.kind === 'edo_missing') {
+                writeItemRow({
+                  idx: null,
+                  nameRaw: `(строки УПД № ${line.doc.docNumber ?? 'без номера'} не прочитаны)`,
+                  qtyPlanned: null,
+                  qtyActual: null,
+                  unit: '',
+                  price: null,
+                  vatSum: null,
+                  sum: null,
+                  link,
+                  source: `${edoLabel(line.doc)}: ${line.reason}`,
+                });
+                continue;
+              }
+              const { item } = line;
+              // 0 — в файле нет КолТов: «0» читалось бы как «ничего не поставили».
+              const qty = item.qty === 0 ? null : item.qty;
+              writeItemRow({
+                idx: item.lineNo ?? item.position + 1,
+                nameRaw: item.nameRaw,
+                qtyPlanned: qty,
+                qtyActual: null,
+                unit: item.unit ?? '',
+                price: item.price,
+                vatSum: item.vatSum,
+                sum:
+                  item.sumExVat ??
+                  (qty !== null && item.price !== null
+                    ? Math.round(qty * item.price * 100) / 100
+                    : null),
+                link,
+                source: edoLabel(line.doc),
+              });
+            }
           }
         }
         ws.properties.outlineLevelRow = 1;

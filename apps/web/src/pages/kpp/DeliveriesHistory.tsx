@@ -59,6 +59,13 @@ import {
 } from '../../shared/ui/tableSorters';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import {
+  edoHeaderSumLabel,
+  edoListHint,
+  edoListSourceLabel,
+  edoNumbersText,
+  listSums,
+} from '../../shared/utils/edoSummaryView';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { partyCell } from '../../shared/ui/documentPartyColumns';
 import { externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
@@ -156,6 +163,38 @@ function deliveryItemsVatSum(items: Row['items'] | undefined): number | null {
     hasAny = true;
   }
   return hasAny ? sum : null;
+}
+
+/** Факт приёмки — Σ по строкам, как было в колонках до ЭДО. */
+function factSums(r: Row): { exVat: number | null; vat: number | null } {
+  return {
+    exVat: r.itemsTotal ?? deliveryItemsTotal(r.items),
+    vat: r.itemsVatSum ?? deliveryItemsVatSum(r.items),
+  };
+}
+
+/**
+ * Сумма в колонке списка. С УПД из ЭДО — по ЭДО (edoSummary.list) с меткой
+ * источника и фактом приёмки в подсказке; без ЭДО — факт, как раньше. Те же
+ * цифры уходят в выгрузку Excel.
+ */
+function ListSumCell({ row, field }: { row: Row; field: 'exVat' | 'vat' }) {
+  const fact = factSums(row);
+  const money = formatMoneyRu(listSums(row.edoSummary, fact)[field]);
+  const label = edoListSourceLabel(row.edoSummary);
+  if (!label || !row.edoSummary) return <>{money}</>;
+  return (
+    <Tooltip title={edoListHint(row.edoSummary, fact)}>
+      <span>
+        {money}
+        <div>
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+            {label}
+          </Typography.Text>
+        </div>
+      </span>
+    </Tooltip>
+  );
 }
 
 export function DeliveriesHistory({
@@ -709,6 +748,8 @@ export function DeliveriesHistory({
         ? Number(sd.totalSum)
         : null;
     const totalSum = money ? money.total : linkedDocs.length === 0 ? fallbackSum : null;
+    // С УПД из ЭДО номер и сумма — по ЭДО, как в шапке карточки.
+    const edo = r.edoSummary;
     return {
       delivery: r,
       contractorName:
@@ -718,9 +759,10 @@ export function DeliveriesHistory({
         null,
       supplierName: resolveSupplierName(r),
       siteName: r.siteName ?? (siteId ? (sitesMap.get(siteId) ?? null) : null),
-      docNumber: short.numbers ?? sd?.docNumber ?? null,
-      docKindLabel: kindLabel,
-      docTotalSum: totalSum,
+      docNumber: edo ? edoNumbersText(edo, linkedDocs) : (short.numbers ?? sd?.docNumber ?? null),
+      docKindLabel: edo ? 'УПД из ЭДО' : kindLabel,
+      docTotalSum: edo ? edo.header.total : totalSum,
+      docTotalLabel: edo ? edoHeaderSumLabel(edo) : 'Сумма',
     };
   };
 
@@ -1525,15 +1567,13 @@ export function DeliveriesHistory({
                 title: 'Сумма НДС',
                 key: 'vatSum',
                 width: 120,
-                render: (_: unknown, r: Row) =>
-                  formatMoneyRu(r.itemsVatSum ?? deliveryItemsVatSum(r.items)),
+                render: (_: unknown, r: Row) => <ListSumCell row={r} field="vat" />,
               },
               {
                 title: 'Сумма',
                 key: 'totalSum',
                 width: 130,
-                render: (_: unknown, r: Row) =>
-                  formatMoneyRu(r.itemsTotal ?? deliveryItemsTotal(r.items)),
+                render: (_: unknown, r: Row) => <ListSumCell row={r} field="exVat" />,
               },
               {
                 title: 'Действия',

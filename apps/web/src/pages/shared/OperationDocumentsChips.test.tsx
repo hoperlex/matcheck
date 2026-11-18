@@ -8,7 +8,7 @@
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { OperationSourceDocument } from '@matcheck/contracts';
+import type { EdoSummary, OperationSourceDocument } from '@matcheck/contracts';
 import { OperationDocumentsChips } from './OperationDocumentsChips';
 
 const doc = (over: Partial<OperationSourceDocument> = {}): OperationSourceDocument => ({
@@ -275,5 +275,125 @@ describe('OperationDocumentsChips', () => {
 
     // Один раскрытый поповер, а не два: состояние хранится на группу.
     expect(document.querySelectorAll('.ant-popover:not(.ant-popover-hidden)')).toHaveLength(1);
+  });
+});
+
+/**
+ * Шапка с УПД из ЭДО/СБИС: номер, дата и сумма — по ЭДО (edoSummary с
+ * сервера). Пример — приёмка 25495: скан «22735030 / SX», в СБИС № 14622014.
+ */
+describe('OperationDocumentsChips — УПД из ЭДО', () => {
+  const scan = doc({
+    id: '00000000-0000-4000-8000-00000000000a',
+    docNumber: '22735030 / SX',
+    docDate: '2026-11-16',
+    totalSum: '15963.82',
+  });
+  const summary = (over: Partial<EdoSummary> = {}): EdoSummary => ({
+    documents: [
+      {
+        matchId: '00000000-0000-4000-8000-0000000000e1',
+        source: 'export',
+        documentId: '00000000-0000-4000-8000-0000000000d1',
+        operator: 'sbis',
+        docNumber: '14622014',
+        docDate: '2026-11-16',
+        totalSum: 15963.82,
+        vatSum: 2878.72,
+        sectionDocumentId: null,
+        pairedSourceDocumentId: scan.id,
+        pairedBy: 'sum_date',
+        deliveryCount: 1,
+        replacesFact: true,
+      },
+    ],
+    unpairedLinkedDocumentIds: [],
+    ambiguous: false,
+    sharedMax: 1,
+    header: {
+      total: 15963.82,
+      known: 1,
+      count: 1,
+      source: 'edo',
+      comparison: { edo: 15963.82, scan: 15963.82, mismatch: false },
+    },
+    list: {
+      exVat: 13085.1,
+      vat: 2878.72,
+      source: 'edo',
+      edoExVat: 13085.1,
+      edoVat: 2878.72,
+      factExVat: null,
+      factVat: null,
+      edoMissing: 0,
+    },
+    ...over,
+  });
+
+  it('номер и сумма — из ЭДО, бумага с парой из чипов уходит', () => {
+    render(<OperationDocumentsChips documents={[scan]} edoSummary={summary()} />);
+
+    expect(screen.getByText('УПД из ЭДО:')).toBeTruthy();
+    expect(screen.getByText('14622014')).toBeTruthy();
+    expect(screen.queryByText('22735030 / SX')).toBeNull();
+    expect(screen.getByText(/^Сумма по ЭДО: 15 963,82/)).toBeTruthy();
+    expect(screen.getByText('Дата документа: 2026-11-16')).toBeTruthy();
+    // Совпало со сканом — пометки нет.
+    expect(screen.queryByText(/по скану/)).toBeNull();
+  });
+
+  it('бумага остаётся в поповере с «Отвязать» по клику на чип ЭДО', () => {
+    const onUnlink = vi.fn();
+    render(
+      <OperationDocumentsChips documents={[scan]} edoSummary={summary()} onUnlink={onUnlink} />,
+    );
+    fireEvent.click(screen.getByText('14622014'));
+    expect(screen.getByText(/22735030 \/ SX/)).toBeTruthy();
+    expect(screen.getByText('Отвязать')).toBeTruthy();
+  });
+
+  it('итог скана расходится с ЭДО — оранжевая пометка «по скану»', () => {
+    render(
+      <OperationDocumentsChips
+        documents={[scan]}
+        edoSummary={summary({
+          header: {
+            total: 2323906.09,
+            known: 1,
+            count: 1,
+            source: 'edo',
+            comparison: { edo: 2323906.09, scan: 156336, mismatch: true },
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText(/^Сумма по ЭДО: 2 323 906,09/)).toBeTruthy();
+    expect(screen.getByText(/по скану 156 336,00/)).toBeTruthy();
+  });
+
+  it('только ЭДО, без скана: чипы есть, а не пусто', () => {
+    render(
+      <OperationDocumentsChips
+        documents={[]}
+        edoSummary={summary({ sharedMax: 3, header: { ...summary().header, comparison: null } })}
+      />,
+    );
+    expect(screen.getByText('14622014')).toBeTruthy();
+    expect(screen.getByText(/Сумма по ЭДО: 15 963,82 .* · УПД на 3 приёмки/)).toBeTruthy();
+  });
+
+  it('скан без пары остаётся в чипах, подпись — «по документам»', () => {
+    const other = doc({ id: 'b', docNumber: 'ТН-7', totalSum: '100.00' });
+    render(
+      <OperationDocumentsChips
+        documents={[scan, other]}
+        edoSummary={summary({
+          unpairedLinkedDocumentIds: ['b'],
+          header: { total: 16063.82, known: 2, count: 2, source: 'mixed', comparison: null },
+        })}
+      />,
+    );
+    expect(screen.getByText('ТН-7')).toBeTruthy();
+    expect(screen.getByText(/^Сумма по документам: 16 063,82/)).toBeTruthy();
   });
 });

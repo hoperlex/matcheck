@@ -177,3 +177,46 @@ describe('DeliveryViewModal: вход в редактор', () => {
     fetchSpy.mockRestore();
   });
 });
+
+describe('DeliveryViewModal: сумма по УПД из ЭДО', () => {
+  const edoSummary = {
+    documents: [],
+    unpairedLinkedDocumentIds: [],
+    ambiguous: false,
+    sharedMax: 2,
+    header: {
+      total: 2323906.09,
+      known: 1,
+      count: 1,
+      source: 'edo',
+      comparison: { edo: 2323906.09, scan: 156336, mismatch: true },
+    },
+    list: {
+      exVat: 1904840.56,
+      vat: 419065.53,
+      source: 'edo',
+      edoExVat: 1904840.56,
+      edoVat: 419065.53,
+      factExVat: null,
+      factVat: null,
+      edoMissing: 0,
+    },
+  };
+
+  it('подпись «Сумма по ЭДО», пометки расхождения и общей УПД; без «Без документа»', () => {
+    can.mockReturnValue(false);
+    renderModal({
+      ...(data as object),
+      delivery: { ...(data as { delivery: object }).delivery, edoSummary },
+      docKindLabel: 'УПД из ЭДО',
+      docNumber: '524',
+      docTotalSum: 2323906.09,
+      docTotalLabel: 'Сумма по ЭДО',
+    });
+    expect(screen.getByText(/^Сумма по ЭДО: 2 323 906,09 .* · УПД на 2 приёмки/)).toBeTruthy();
+    expect(screen.getByText(/по скану 156 336,00/)).toBeTruthy();
+    expect(screen.getByText('УПД из ЭДО №524')).toBeTruthy();
+    // sourceDocumentIds пуст, но УПД из ЭДО есть — это не «без документа».
+    expect(screen.queryByText('Без документа')).toBeNull();
+  });
+});
