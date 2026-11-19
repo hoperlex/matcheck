@@ -227,6 +227,13 @@ export const ShipmentUpsertSchema = z.object({
    * транзита, не перемещение), иначе 400. При обновлении игнорируется.
    */
   isManual: z.boolean().optional(),
+  /**
+   * Получателя в форме не правили — сервер оставляет того, что в строке
+   * (receiverCounterpartyId/receiverMolId запроса не пишет), а сочетание вида и
+   * получателя проверяет по нему под блокировкой. Смысл и совместимость — как у
+   * DeliveryUpsertSchema.keepRecipient. Учитывается только при обновлении.
+   */
+  keepReceiver: z.boolean().optional(),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(ShipmentUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),

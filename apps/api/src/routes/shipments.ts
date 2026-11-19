@@ -102,6 +102,12 @@ import {
 } from '../lib/contractor-scope.js';
 import { expandSupplierFilterIds } from '../domain/directories/supplier-filter-groups.js';
 import { publishEvent } from './events.js';
+import {
+  kindLinksStatus,
+  ShipmentKindLinksError,
+  validateKindLinks,
+} from '../domain/operations/shipment-kind-links.js';
+import { registerShipmentRecipientRoutes } from './shipment-recipient.js';
 import { dateRangeConditions } from '../lib/date-range.js';
 import { parseUuidCsv } from '../lib/uuid-csv.js';
 import { escapeLike } from '../lib/like.js';
@@ -1285,10 +1291,17 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       // receiver_required → 422 (документ не дозаполнен, mobile показывает
       // понятный текст и НЕ ретраит). invalid_kind_links → 400 (клиент послал
       // несовместимые поля). Разделение нужно mobile-MutationProcessor'у.
-      const linksError = validateKindLinks(input);
+      //
+      // keepReceiver: получатель запроса — лишь снимок формы портала, в строку
+      // он не пишется. Сочетание вида с ФАКТИЧЕСКИМ получателем проверяет
+      // updateShipment под блокировкой строки (ShipmentKindLinksError); ранняя
+      // проверка по снимку дала бы ложный ответ. Для записи, которой ещё нет
+      // (флаг тогда не действует), проверка — в ветке создания ниже.
+      const linksError = input.keepReceiver === true ? null : validateKindLinks(input);
       if (linksError) {
-        const statusCode = linksError.code === 'receiver_required' ? 422 : 400;
-        return reply.code(statusCode).send({ error: linksError.code, message: linksError.message });
+        return reply
+          .code(kindLinksStatus(linksError))
+          .send({ error: linksError.code, message: linksError.message });
       }
 
       try {
@@ -1303,6 +1316,14 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
             // приходит с уже сгенерированным UUID, поэтому create/edit решает
             // наличие строки в БД, а не наличие input.id.
             await assertPermission(req, 'operations.shipments', 'create');
+            // keepReceiver у создания не действует — получатель берётся из
+            // запроса, и проверить его нужно здесь (выше её пропустили).
+            const createLinksError = input.keepReceiver === true ? validateKindLinks(input) : null;
+            if (createLinksError) {
+              return reply
+                .code(kindLinksStatus(createLinksError))
+                .send({ error: createLinksError.code, message: createLinksError.message });
+            }
             await createShipment(
               app,
               input,
@@ -1374,6 +1395,13 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
         }
 
         await assertPermission(req, 'operations.shipments', 'create');
+        // Как в ветке создания по id: keepReceiver при создании не действует.
+        const newLinksError = input.keepReceiver === true ? validateKindLinks(input) : null;
+        if (newLinksError) {
+          return reply
+            .code(kindLinksStatus(newLinksError))
+            .send({ error: newLinksError.code, message: newLinksError.message });
+        }
         const created = await createShipment(
           app,
           input,
@@ -1397,6 +1425,13 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof InvalidManualEntryError) {
           return reply.code(400).send({ error: 'invalid_manual_entry', message: err.message });
+        }
+        // keepReceiver: вид не сочетается с получателем, который в строке под
+        // блокировкой (его могли сменить PATCH-ем после чтения формы).
+        if (err instanceof ShipmentKindLinksError) {
+          return reply
+            .code(kindLinksStatus(err.detail))
+            .send({ error: err.detail.code, message: err.detail.message });
         }
         if (err instanceof SourceAlreadyLinkedError) {
           return reply.code(400).send({
@@ -2464,63 +2499,8 @@ export async function shipmentRoutes(rawApp: FastifyInstance): Promise<void> {
       return dto;
     },
   );
-}
 
-/**
- * Результат проверки согласованности kind ↔ receiver/destSite.
- * `code='receiver_required'` нужен mobile, чтобы отличить «документ
- * не дозаполнен — попросить менеджера» от «клиент послал мусор».
- * Остальные ошибки — обычные `invalid_kind_links` (400).
- */
-type KindLinksError = {
-  code: 'receiver_required' | 'invalid_kind_links';
-  message: string;
-};
-function validateKindLinks(input: z.infer<typeof ShipmentUpsertSchema>): KindLinksError | null {
-  const { kind, receiverCounterpartyId, receiverMolId, destSiteId, siteId, sourceDocumentIds } =
-    input;
-  // Получатель указан XOR через counterparty или МОЛ (двух одновременно — нельзя).
-  const hasContractorReceiver = Boolean(receiverCounterpartyId);
-  const hasMolReceiver = Boolean(receiverMolId);
-  const hasAnyReceiver = hasContractorReceiver || hasMolReceiver;
-  const hasBothReceivers = hasContractorReceiver && hasMolReceiver;
-  const bad = (message: string): KindLinksError => ({ code: 'invalid_kind_links', message });
-  const noReceiver = (message: string): KindLinksError => ({
-    code: 'receiver_required',
-    message,
-  });
-  // Empty-draft = отгрузка без привязанной УПД (создана инспектором через
-  // «Создать отгрузку» на мобиле). У таких отгрузок получатель может быть
-  // не указан — менеджер дозaпoлнит на портале. Конфликт с DB-CHECK
-  // shipments_kind_links_chk решается тем, что для contractor допускается
-  // запись без receiver (CHECK не запрещает оба NULL).
-  const isEmptyDraft = !sourceDocumentIds || sourceDocumentIds.length === 0;
-
-  if (kind === 'contractor') {
-    if (hasBothReceivers) return bad('Укажите получателя одним способом: подрядчик или МОЛ');
-    if (!hasAnyReceiver && !isEmptyDraft) {
-      return noReceiver('Для отгрузки нужен получатель (подрядчик или МОЛ)');
-    }
-    if (destSiteId) return bad('destSiteId допустим только для перемещения');
-    return null;
-  }
-  if (kind === 'return') {
-    if (hasMolReceiver) return bad('Возврат поставщику оформляется только на контрагента');
-    if (!hasContractorReceiver) return noReceiver('Для возврата нужен получатель-поставщик');
-    if (destSiteId) return bad('destSiteId допустим только для перемещения');
-    return null;
-  }
-  if (kind === 'transfer') {
-    if (!destSiteId) return bad('Для перемещения нужен объект-получатель');
-    if (destSiteId === siteId) return bad('Объект-получатель не может совпадать с источником');
-    if (hasBothReceivers) return bad('Укажите получателя одним способом: подрядчик или МОЛ');
-    if (!hasAnyReceiver)
-      return noReceiver('Для перемещения нужен получатель на новом объекте (подрядчик или МОЛ)');
-    return null;
-  }
-  // writeoff
-  if (hasAnyReceiver || destSiteId) return bad('Для списания получатель не указывается');
-  return null;
+  registerShipmentRecipientRoutes(rawApp, buildShipmentDto);
 }
 
 /**
@@ -2808,6 +2788,30 @@ async function updateShipment(
   // Атомарность update: статус/шапка + позиции + источники + touch УПД —
   // одна транзакция (симметрично updateDelivery).
   return await app.db.transaction(async (tx: typeof app.db) => {
+    // keepReceiver — получателя в форме портала не правили (он сохраняется
+    // отдельным PATCH): колонки получателя не пишем, а сочетание присланных вида
+    // и «Куда» проверяем с ФАКТИЧЕСКИМ получателем под блокировкой строки —
+    // ранняя проверка в маршруте видела только снимок формы. Нет строки — UPDATE
+    // ниже вернёт ноль строк и разберёт причину сам.
+    const keepReceiver = input.keepReceiver === true;
+    if (keepReceiver) {
+      const [locked] = await tx
+        .select({
+          receiverCounterpartyId: shipments.receiverCounterpartyId,
+          receiverMolId: shipments.receiverMolId,
+        })
+        .from(shipments)
+        .where(eq(shipments.id, id))
+        .for('update');
+      if (locked) {
+        const linksError = validateKindLinks({
+          ...input,
+          receiverCounterpartyId: locked.receiverCounterpartyId,
+          receiverMolId: locked.receiverMolId,
+        });
+        if (linksError) throw new ShipmentKindLinksError(linksError);
+      }
+    }
     const updatedRows = await tx
       .update(shipments)
       .set({
@@ -2817,8 +2821,10 @@ async function updateShipment(
         inTransit: input.inTransit ?? false,
         isAssets: input.isAssets ?? false,
         siteId: input.siteId,
-        receiverCounterpartyId: input.receiverCounterpartyId ?? null,
-        receiverMolId: input.receiverMolId ?? null,
+        ...(!keepReceiver && {
+          receiverCounterpartyId: input.receiverCounterpartyId ?? null,
+          receiverMolId: input.receiverMolId ?? null,
+        }),
         destSiteId: input.destSiteId ?? null,
         supplierId: input.supplierId ?? null,
         vehiclePlate: input.vehiclePlate ?? null,

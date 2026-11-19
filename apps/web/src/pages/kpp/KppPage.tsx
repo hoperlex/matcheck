@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
@@ -64,13 +64,14 @@ import {
   enqueueMutation,
   getDelivery,
   hardDeleteDelivery,
+  dropLocalRecipient,
   markDeletion as markDeliveryDeletion,
   unmarkDeletion as unmarkDeliveryDeletion,
   upsertServerSnapshot,
 } from '../../services/deliveries';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
-import { flushMutation, type MutationResult } from '../../services/mutationQueue';
+import { flushMutation, withQueueLock, type MutationResult } from '../../services/mutationQueue';
 import { describeEmptyNames } from '../../shared/utils/emptyItemNames';
 import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 import { EditableItemName } from '../shared/EditableItemName';
@@ -259,6 +260,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // Подрядчик выбирается из справочника заказчика через from-directory —
   // у маршрута свой allow-list (admin/manager + расширение правки).
   const canPickContractor = hasCapability('operations.edit.contractor_directory');
+  // Общий получатель сохраняется сразу (PATCH /deliveries/:id/recipient) — у
+  // существующей приёмки и при праве. Возможность общая с отгрузками и
+  // выдаётся за любой из маршрутов, поэтому нужна и правка самой страницы (как
+  // у canEditFlags). Черновик и роль без права — прежний режим: выбор живёт в
+  // форме до «Сохранить» (жалоба мониторинга 18.11.2026 — там он и терялся).
+  const recipientImmediate =
+    !!deliveryId && !isNew && canEditDelivery && hasCapability('operations.edit.recipient');
   // Заказы поставщикам из EstiMat: видны всем, кто видит карточку, кроме
   // подрядчика (суммы и поставщики заказа — не для него); привязывают те, кому
   // открыт маршрут привязки (admin/manager и расширение правки).
@@ -306,6 +314,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
    * поллинг вернул бы прежний текст.
    */
   const itemsDirtyRef = useRef(false);
+  // То же для получателя в прежнем режиме «до Сохранить»: пока выбор не ушёл
+  // на сервер, перечитка формы его не трогает. В режиме «сразу» не нужен —
+  // там получатель всегда с сервера.
+  const recipientDirtyRef = useRef(false);
   // Версия приёмки, которой соответствуют строки формы (см. shared/itemsVersion.ts).
   // Её, а не версию поллинга, отправляют «Сохранить» и отвязка с удалением.
   const itemsVersionRef = useRef<number | null>(null);
@@ -634,6 +646,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // 2 Этап в мобиле материалы на портале «замораживались» до F5, хотя фото
   // и распарсенный comment подхватывались автоматически.
   const lastSyncedUpdatedAtRef = useRef<string | null>(null);
+  // Госномер и комментарий, какими их последний раз взяли с сервера. Перечитка
+  // заменяет поле, только если человек его не менял: иначе PATCH соседнего чипа
+  // (признак, флаги, получатель), сдвинувший updatedAt, стирал набранное.
+  const hydratedHeaderRef = useRef<{ plate: string; comment: string } | null>(null);
 
   useEffect(() => {
     const d = deliveryQuery.data;
@@ -654,8 +670,17 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       hydratedIdRef.current = d.id;
       lastSyncedUpdatedAtRef.current = d.updatedAt;
       if (isFirstHydration) setPendingPurpose(null);
-      setPlate(d.vehiclePlate ?? '');
-      setComment(d.comment ?? '');
+      const serverPlate = d.vehiclePlate ?? '';
+      const serverComment = d.comment ?? '';
+      const prevHeader = isFirstHydration ? null : hydratedHeaderRef.current;
+      if (prevHeader) {
+        setPlate((cur) => (cur === prevHeader.plate ? serverPlate : cur));
+        setComment((cur) => (cur === prevHeader.comment ? serverComment : cur));
+      } else {
+        setPlate(serverPlate);
+        setComment(serverComment);
+      }
+      hydratedHeaderRef.current = { plate: serverPlate, comment: serverComment };
       // siteId/contractorId подхватываются один раз — последующее редактирование
       // ведётся через локальный state. Для inspector_kpp siteId всегда фиксирован
       // на назначенном объекте.
@@ -665,15 +690,22 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         setSiteId((prev) => prev ?? (d.siteId === SYSTEM_SITE_ID ? null : d.siteId));
       }
       // Восстановление получателя: если в БД заполнен recipientMolId — это МОЛ,
-      // иначе counterparty (даже если contractorId = null).
-      if (d.recipientMolId) {
-        setRecipientKind('mol');
-        setRecipientMolId((prev) => prev ?? d.recipientMolId);
-        setContractorId(null);
-      } else {
-        setRecipientKind('counterparty');
-        setContractorId((prev) => prev ?? d.contractorId ?? null);
-        setRecipientMolId(null);
+      // иначе counterparty (даже если contractorId = null). Значение сервера
+      // берётся целиком — прежнее `prev ??` при смене вида оставляло старое и
+      // сбрасывало выбор человека. Несохранённый выбор (режим «до Сохранить»)
+      // не трогаем; в режиме «сразу» получателя ведёт эффект синхронизации
+      // (иначе опрос со старым снимком посреди PATCH откатил бы выбранное).
+      if (isFirstHydration) recipientDirtyRef.current = false;
+      if (!recipientImmediate && !recipientDirtyRef.current) {
+        if (d.recipientMolId) {
+          setRecipientKind('mol');
+          setRecipientMolId(d.recipientMolId);
+          setContractorId(null);
+        } else {
+          setRecipientKind('counterparty');
+          setContractorId(d.contractorId ?? null);
+          setRecipientMolId(null);
+        }
       }
       // Позиции не трогаем, пока в форме есть неотправленная правка: иначе
       // поллинг стирает набранный текст (правило — shared/itemsHydration.ts).
@@ -727,7 +759,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
         .then(setSelectedUpd)
         .catch(() => undefined);
     }
-  }, [deliveryQuery.data, selectedUpd, isInspector, inspectorSiteId]);
+  }, [deliveryQuery.data, selectedUpd, isInspector, inspectorSiteId, recipientImmediate]);
 
   // Гидратация формы в режиме isNew по выбранному УПД. items/contractorId/siteId
   // подставляются из SourceDocumentDetail один раз — далее редактирование идёт
@@ -966,8 +998,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       // создании приёмки из УПД; у существующей перезаписывать его «первым
       // документом» нельзя — документов может быть несколько.
       supplierId: (isNew ? selectedUpd?.supplierId : null) ?? loadedDelivery.supplierId ?? null,
-      contractorId: recipientKind === 'counterparty' ? contractorId : null,
-      recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
+      // В режиме «сразу» получателя в правке нет: он уже записан отдельным
+      // PATCH, и upsert уйдёт с keepRecipient (services/deliveries.ts) — форма,
+      // устаревшая хоть на секунду, не вернёт прежнее значение.
+      ...(!recipientImmediate && {
+        contractorId: recipientKind === 'counterparty' ? contractorId : null,
+        recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
+      }),
       ...(pendingPurpose !== null && canChoosePurpose && { purpose: pendingPurpose }),
       vehiclePlate: isManualNew ? null : plate || null,
       arrivedAt: isManualNew ? operationAt : (loadedDelivery.arrivedAt ?? operationAt),
@@ -1057,6 +1094,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     const result = await flushMutation(mutationId);
     if (result.outcome === 'server_acked') {
       itemsDirtyRef.current = false;
+      recipientDirtyRef.current = false;
       // Ждём свежий snapshot через pullSync. Без него invalidateQueries в
       // onSuccess делает refetch /deliveries раньше, чем изменения доехали, и
       // таблица показывает старый siteId/contractorId до F5.
@@ -1420,6 +1458,84 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     },
     onError: (err: Error) => message.error(err.message),
   });
+
+  /**
+   * Общий получатель — сразу (режим recipientImmediate). Перед PATCH под замком
+   * очереди убираем выбор получателя из неотправленной правки: иначе старое
+   * «Сохранить» из очереди ушло бы после PATCH без keepRecipient и вернуло бы
+   * прежнего. Начатая отправка закончится раньше — порядок «старый upsert →
+   * PATCH». Пока запрос идёт, чип, подсказка, «Признак», «Сохранить» и
+   * «Подтвердить» заблокированы: второй выбор не обгонит первый.
+   */
+  const saveRecipient = useMutation({
+    mutationFn: async (
+      body: { contractorId: string } | { recipientMolId: string } | { none: true },
+    ) => {
+      if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
+      const id = loadedDelivery.id;
+      await withQueueLock(() => dropLocalRecipient(id));
+      return api.patch<Delivery>(`/deliveries/${id}/recipient`, body);
+    },
+    onMutate: beforeDeliveryPatch,
+    onSuccess: (dto) => {
+      message.success('Получатель сохранён');
+      applyDeliveryResponse(dto);
+    },
+    // Блоком, без возврата: message.error отдаёт thenable, который React Query
+    // ждёт до закрытия сообщения (~3 с) — всё это время мутация считалась бы
+    // идущей, и чип с «Сохранить» стояли бы заблокированными.
+    onError: (err: Error) => {
+      message.error(err.message);
+    },
+  });
+
+  // Режим «сразу»: получатель формы — всегда серверный. Пока PATCH идёт, чип
+  // показывает выбранное (оптимистично); ответ или ошибка вернут сюда
+  // серверное значение — при ошибке это и есть откат.
+  const serverContractorId = loadedDelivery?.contractorId ?? null;
+  const serverRecipientMolId = loadedDelivery?.recipientMolId ?? null;
+  const recipientSavePending = saveRecipient.isPending;
+  const deliveryLoaded = loadedDelivery !== null;
+  const syncRecipientFromServer = useCallback(() => {
+    if (serverRecipientMolId) {
+      setRecipientKind('mol');
+      setRecipientMolId(serverRecipientMolId);
+      setContractorId(null);
+    } else {
+      setRecipientKind('counterparty');
+      setContractorId(serverContractorId);
+      setRecipientMolId(null);
+    }
+  }, [serverContractorId, serverRecipientMolId]);
+  useEffect(() => {
+    if (!recipientImmediate || recipientSavePending || !deliveryLoaded) return;
+    syncRecipientFromServer();
+  }, [recipientImmediate, recipientSavePending, syncRecipientFromServer, deliveryLoaded]);
+
+  // Окно чипа закрылось выбором (а не кликом мимо) — серверное значение
+  // возвращать не нужно: его принесёт ответ PATCH.
+  const recipientPickedRef = useRef(false);
+  /**
+   * Выбор получателя в чипе или «Подставить». Режим «сразу» — PATCH (тот же
+   * получатель, что на сервере, не пишем); иначе выбор остаётся в форме до
+   * «Сохранить», и перечитка формы его не трогает.
+   */
+  const pickRecipient = (
+    body: { contractorId: string } | { recipientMolId: string } | { none: true },
+  ) => {
+    if (!recipientImmediate) {
+      recipientDirtyRef.current = true;
+      return;
+    }
+    recipientPickedRef.current = true;
+    const next = {
+      contractorId: 'contractorId' in body ? body.contractorId : null,
+      recipientMolId: 'recipientMolId' in body ? body.recipientMolId : null,
+    };
+    if (next.contractorId === serverContractorId && next.recipientMolId === serverRecipientMolId)
+      return;
+    saveRecipient.mutate(body);
+  };
 
   const patchRecipientMode = useMutation({
     mutationFn: async (perDocument: boolean) => {
@@ -1936,9 +2052,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
     if (!loadedDelivery) return null;
     const pendingAt = loadedDelivery?.pendingDeletionAt ?? null;
     const isPending = pendingAt !== null;
+    // В режиме «сразу» несохранённого получателя не бывает: выбор пишется
+    // PATCH-ем, а на время запроса всё зависящее от него заблокировано.
     const recipientDirty =
-      (recipientKind === 'counterparty' ? contractorId : null) !== loadedDelivery.contractorId ||
-      (recipientKind === 'mol' ? recipientMolId : null) !== loadedDelivery.recipientMolId;
+      !recipientImmediate &&
+      ((recipientKind === 'counterparty' ? contractorId : null) !== loadedDelivery.contractorId ||
+        (recipientKind === 'mol' ? recipientMolId : null) !== loadedDelivery.recipientMolId);
     // Тумблер «Разные получатели» и получатель строки УПД — по возможности,
     // а не по роли: Мониторинг получает её выданным «Редактировать».
     const canEditDocumentRecipient =
@@ -1950,11 +2069,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       (loadedDelivery.documentRecipients ?? []).some((x) => x.ownPurpose) ||
       edoDocuments.some((x) => x.ownPurpose);
     // Любой PATCH настроек документа (скан или УПД из ЭДО) — чипы ждут ответа.
+    // Общий получатель тоже: он согласует наследуемые признаки документов.
     const documentPatchPending =
       patchDocumentRecipient.isPending ||
       patchDocumentPurpose.isPending ||
       patchEdoRecipient.isPending ||
-      patchEdoPurpose.isPending;
+      patchEdoPurpose.isPending ||
+      saveRecipient.isPending;
     // Договоры 1С документов (режим «разные получатели»): id документа → договор.
     const documentContracts = new Map(
       (contractQuery.data?.documents ?? []).map((x) => [x.documentId, x.contract] as const),
@@ -2155,8 +2276,21 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               <InlineEditChip
                 label={loadedDelivery?.recipientsPerDocument ? 'Получатель (общий)' : 'Получатель'}
                 value={recipientLabel}
-                disabled={isContractor || !canEditDelivery}
+                disabled={isContractor || !canEditDelivery || saveRecipient.isPending}
                 width={320}
+                // Режим «сразу»: окно открывается с серверным получателем, а
+                // закрытое без выбора (сменили только «Подрядчик / МОЛ»)
+                // возвращает его — иначе чип показывал бы «не указан», хотя
+                // на сервере получатель есть.
+                onOpenChange={
+                  recipientImmediate
+                    ? (open) => {
+                        if (open) recipientPickedRef.current = false;
+                        if (!recipientPickedRef.current && !saveRecipient.isPending)
+                          syncRecipientFromServer();
+                      }
+                    : undefined
+                }
               >
                 {(close) => (
                   <RecipientPicker
@@ -2166,6 +2300,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       setRecipientKind(next);
                       if (next === 'counterparty') setRecipientMolId(null);
                       else setContractorId(null);
+                      if (!recipientImmediate) recipientDirtyRef.current = true;
                     }}
                     contractorId={contractorId}
                     contractorName={contractorName}
@@ -2177,11 +2312,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       setPendingPurpose(null);
                       if (id && name) setPickedContractor({ id, name });
                       setContractorId(id);
+                      pickRecipient(id ? { contractorId: id } : { none: true });
                       close();
                     }}
                     onMolChange={(id) => {
                       setPendingPurpose(null);
                       setRecipientMolId(id);
+                      pickRecipient(id ? { recipientMolId: id } : { none: true });
                       close();
                     }}
                   />
@@ -2263,6 +2400,10 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       setPendingPurpose(null);
                       setPickedContractor({ id: cp.id, name: cp.name });
                       setContractorId(cp.id);
+                      // Тот же путь, что ручной выбор в чипе: в режиме «сразу»
+                      // подставленный подрядчик пишется PATCH-ем, а не ждёт
+                      // «Сохранить» (buildPatch в этом режиме получателя не шлёт).
+                      pickRecipient({ contractorId: cp.id });
                     }}
                   />
                 )}
@@ -2499,13 +2640,22 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   // вместе с ним в одном upsert. Для сохранённого получателя
                   // признак по-прежнему меняется точечным PATCH.
                   const savedKind = deliveryRecipientKind(loadedDelivery);
-                  const formRecipient = {
-                    contractorId: recipientKind === 'counterparty' ? contractorId : null,
-                    recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
-                  };
+                  // В режиме «сразу» получатель формы — серверный: признак
+                  // меняется точечным PATCH, пока запрос получателя не идёт.
+                  const formRecipient = recipientImmediate
+                    ? {
+                        contractorId: loadedDelivery.contractorId,
+                        recipientMolId: loadedDelivery.recipientMolId,
+                      }
+                    : {
+                        contractorId: recipientKind === 'counterparty' ? contractorId : null,
+                        recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
+                      };
                   const recipientDirty =
                     (formRecipient.contractorId ?? null) !== loadedDelivery.contractorId ||
                     (formRecipient.recipientMolId ?? null) !== loadedDelivery.recipientMolId;
+                  const purposeLocked =
+                    isPending || patchPurpose.isPending || saveRecipient.isPending;
                   const shown =
                     pendingPurpose ??
                     (recipientDirty
@@ -2517,11 +2667,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                       : (loadedDelivery.purpose ?? null));
                   const allowed = allowedDeliveryPurposes(deliveryRecipientKind(formRecipient));
                   const button = (
-                    <Button
-                      size="small"
-                      loading={patchPurpose.isPending}
-                      disabled={isPending || patchPurpose.isPending}
-                    >
+                    <Button size="small" loading={patchPurpose.isPending} disabled={purposeLocked}>
                       Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:{' '}
                       {shown ? DELIVERY_PURPOSE_LABELS[shown] : '—'} <DownOutlined />
                     </Button>
@@ -2539,7 +2685,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                           }
                         },
                       }}
-                      disabled={isPending || patchPurpose.isPending}
+                      disabled={purposeLocked}
                       trigger={['click']}
                     >
                       {button}
@@ -3063,10 +3209,13 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
               ? `Подтверждено: ${loadedDelivery.confirmedByMolUserEmail ?? '—'}, ${formatMolDate(loadedDelivery.confirmedByMolAt)}`
               : (verifyReason ?? 'Подтвердить документ как МОЛ');
           // Помеченный документ — read-only: блокируем Save и Подтвердить МОЛ.
-          const saveDisabled = !!verifyReason || isPending;
+          // Пока сохраняется получатель, «Сохранить» ждёт: upsert и так идёт с
+          // keepRecipient, но порядок запросов от этого не зависит.
+          const saveDisabled = !!verifyReason || isPending || saveRecipient.isPending;
           // В режиме isNew подтверждение МОЛ недоступно — сначала должна
           // появиться сохранённая запись со статусом filled.
-          const confirmDisabled = isNew || isConfirmed || !!verifyReason || isPending;
+          const confirmDisabled =
+            isNew || isConfirmed || !!verifyReason || isPending || saveRecipient.isPending;
           // «Удалить» в UI = soft-delete (mark-deletion на бэке): запись
           // уходит в корзину, можно восстановить. Доступно для filled/
           // confirmed_mol в активном режиме.

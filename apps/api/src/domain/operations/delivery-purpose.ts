@@ -12,6 +12,7 @@
 
 import { and, eq, isNull } from 'drizzle-orm';
 import {
+  allowedDeliveryPurposes,
   DeliveryPurposeSchema,
   deliveryRecipientKind,
   reconcileDocumentPurpose,
@@ -23,6 +24,25 @@ import { deliveries, deliveryEdoMatches, deliverySources } from '../../db/schema
 
 export type RecipientPair = { contractorId: string | null; recipientMolId: string | null };
 export type GeneralRecipient = RecipientPair & { purpose: DeliveryPurpose | null };
+
+/**
+ * Что пишется в получателя: новая пара или `'keep'` — получатель остаётся как
+ * в строке. `'keep'` шлёт портал, когда получателя в форме не правили: он
+ * сохраняется отдельным PATCH, и «Сохранить» устаревшей формы не должно
+ * возвращать прежнее значение (флаг keepRecipient у upsert).
+ */
+export type RecipientWrite = RecipientPair | 'keep';
+
+/**
+ * Присланный признак не подходит получателю, который ляжет в строку. Маршрут
+ * отвечает 422 purpose_conflicts_recipient; транзакция откатывается целиком.
+ */
+export class PurposeConflictsRecipientError extends Error {
+  constructor() {
+    super('purpose_conflicts_recipient');
+    this.name = 'PurposeConflictsRecipientError';
+  }
+}
 
 /** Собственные настройки документа — те же поля у скана и у УПД из ЭДО. */
 export function documentStateOf(row: {
@@ -131,15 +151,23 @@ function currentPurpose(raw: string | null): { known: DeliveryPurpose | null } |
  * которая затем пишет получателя: конкурентная правка признака дождётся
  * блокировки и проверит его уже против нового получателя.
  *
+ * Присланный признак (`chosenPurpose`) проверяется здесь же — по получателю,
+ * который реально ляжет в строку. При `'keep'` это получатель из строки, а не
+ * из запроса: предпроверка маршрута видит только запрос и при keepRecipient
+ * пропустила бы «Свои силы» к сохранённому подрядчику.
+ *
  * undefined — строки нет; вызывающий сам решает, что это значит.
+ * `previous` / `recipient` — получатель до и после записи (для журнала).
  */
 export async function lockPurposeForRecipientWrite(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx: any,
   deliveryId: string,
-  next: RecipientPair,
+  next: RecipientWrite,
   chosenPurpose?: DeliveryPurpose,
-): Promise<{ purpose: string | null } | undefined> {
+): Promise<
+  { purpose: string | null; previous: RecipientPair; recipient: RecipientPair } | undefined
+> {
   const [row] = await tx
     .select({
       contractorId: deliveries.contractorId,
@@ -151,29 +179,34 @@ export async function lockPurposeForRecipientWrite(
     .where(eq(deliveries.id, deliveryId))
     .for('update');
   if (!row) return undefined;
+  const previous: RecipientPair = {
+    contractorId: row.contractorId,
+    recipientMolId: row.recipientMolId,
+  };
+  const recipient: RecipientPair = next === 'keep' ? previous : next;
+  if (
+    chosenPurpose !== undefined &&
+    !allowedDeliveryPurposes(deliveryRecipientKind(recipient)).includes(chosenPurpose)
+  ) {
+    throw new PurposeConflictsRecipientError();
+  }
   const cur = currentPurpose(row.purpose);
-  if ('raw' in cur && chosenPurpose === undefined) return { purpose: cur.raw };
+  if ('raw' in cur && chosenPurpose === undefined) return { purpose: cur.raw, previous, recipient };
   const previousPurpose = 'raw' in cur ? null : cur.known;
   const nextPurpose =
     chosenPurpose ??
     reconcileDeliveryPurpose(
-      deliveryRecipientKind(row),
-      deliveryRecipientKind(next),
+      deliveryRecipientKind(previous),
+      deliveryRecipientKind(recipient),
       previousPurpose,
     );
   if (row.recipientsPerDocument) {
     await reconcileLinkedDocumentPurposes(
       tx,
       deliveryId,
-      {
-        contractorId: row.contractorId,
-        recipientMolId: row.recipientMolId,
-        purpose: previousPurpose,
-      },
-      { ...next, purpose: nextPurpose },
+      { ...previous, purpose: previousPurpose },
+      { ...recipient, purpose: nextPurpose },
     );
   }
-  return {
-    purpose: nextPurpose,
-  };
+  return { purpose: nextPurpose, previous, recipient };
 }

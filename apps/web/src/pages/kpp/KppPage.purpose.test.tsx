@@ -518,7 +518,11 @@ describe('карточка приёмки: признак зависит от п
     expect(items).toHaveLength(5);
   });
 
-  it('МОЛ выбран, но не сохранён — признак можно выбрать до сохранения', async () => {
+  // Два сценария ниже — прежний режим «получатель до Сохранить»: он остаётся у
+  // роли без возможности operations.edit.recipient (новый режим «сразу» —
+  // KppPage.recipient.test.tsx).
+  it('без права «получатель сразу»: МОЛ выбран, но не сохранён — признак можно выбрать до сохранения', async () => {
+    mocks.deniedCapabilities.add('operations.edit.recipient');
     authUser.role = 'manager';
     current = { ...delivery(3, []), purpose: 'realization' } as Delivery;
     mocks.flushMutation.mockResolvedValue({ outcome: 'queued' });
@@ -555,7 +559,8 @@ describe('карточка приёмки: признак зависит от п
     );
   });
 
-  it('после выбора подрядчика признак доступен сразу и сохраняется вместе с ним', async () => {
+  it('без права «получатель сразу»: после выбора подрядчика признак доступен сразу и сохраняется вместе с ним', async () => {
+    mocks.deniedCapabilities.add('operations.edit.recipient');
     authUser.role = 'manager';
     current = { ...delivery(3, []), purpose: 'own_forces' } as Delivery;
     mocks.apiPost.mockResolvedValue({ id: CONTRACTOR, name: 'ООО «Альфа»' });

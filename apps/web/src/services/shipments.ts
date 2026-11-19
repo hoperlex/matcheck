@@ -126,6 +126,32 @@ export async function applyLocalEdit(
   });
 }
 
+/** Есть ли в неотправленной правке выбор получателя (режим «до Сохранить»). */
+export function hasLocalReceiverEdit(r: ShipmentRecord): boolean {
+  const local = r.local;
+  return local != null && ('receiverCounterpartyId' in local || 'receiverMolId' in local);
+}
+
+/**
+ * Убрать выбор получателя из неотправленной правки отгрузки перед PATCH
+ * получателя — зеркало dropLocalRecipient в services/deliveries.ts (там же
+ * почему). «Тип отгрузки» с получателем не связан и остаётся. Вызывать под
+ * withQueueLock.
+ */
+export async function dropLocalReceiver(id: string): Promise<void> {
+  if (!localCacheEnabled()) return;
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction('shipments', 'readwrite');
+    const existing = await tx.store.get(id);
+    const local = existing?.local;
+    if (existing && local && hasLocalReceiverEdit(existing)) {
+      const { receiverCounterpartyId: _c, receiverMolId: _m, ...rest } = local;
+      await tx.store.put({ ...existing, local: rest });
+    }
+    await tx.done;
+  });
+}
+
 export async function markTombstone(id: string): Promise<void> {
   await withDb(async (dbi) => {
     const tx = dbi.transaction('shipments', 'readwrite');
@@ -178,6 +204,9 @@ export function buildUpsertPayload(r: ShipmentRecord, baseVersion: number): Ship
     // поля возвращались к исходному состоянию.
     receiverCounterpartyId: effective.receiverCounterpartyId,
     receiverMolId: effective.receiverMolId,
+    // Получателя в форме не правили — он сохраняется отдельным PATCH, сервер
+    // оставляет того, что в строке (см. keepRecipient в services/deliveries.ts).
+    ...(r.server !== null && !hasLocalReceiverEdit(r) && { keepReceiver: true }),
     supplierId: effective.supplierId,
     destSiteId: effective.destSiteId,
     purpose: effective.purpose,

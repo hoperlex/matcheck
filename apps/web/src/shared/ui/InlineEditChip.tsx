@@ -35,6 +35,7 @@ export function InlineEditChip({
   placeholder,
   color,
   width,
+  onOpenChange,
 }: {
   label: string;
   /** Текст для отображения в чипе. Не путать с children — там редактор. */
@@ -47,9 +48,19 @@ export function InlineEditChip({
   color?: string;
   /** Ширина Popover-окна (по умолчанию 260px). */
   width?: number;
+  /**
+   * Окно открылось или закрылось — и кликом снаружи, и через `close()`. Нужен
+   * редактору, который при открытии берёт значение с сервера (получатель
+   * приёмки сохраняется сразу, и брошенный выбор вида не должен оставаться).
+   */
+  onOpenChange?: (open: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const close = () => setOpen(false);
+  const change = (next: boolean) => {
+    setOpen(next);
+    onOpenChange?.(next);
+  };
+  const close = () => change(false);
 
   const isEmpty =
     value === null || value === undefined || value === '' || value === '—';
@@ -97,7 +108,7 @@ export function InlineEditChip({
   return (
     <Popover
       open={open}
-      onOpenChange={(v) => setOpen(v)}
+      onOpenChange={(v) => change(v)}
       trigger="click"
       placement="bottomLeft"
       destroyTooltipOnHide

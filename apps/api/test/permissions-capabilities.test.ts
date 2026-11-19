@@ -70,12 +70,16 @@ describe('capabilities: фактический доступ, а не перес�
     expect(caps).not.toContain('operations.edit.link_source');
     expect(caps).not.toContain('operations.edit.supplier_directory');
     expect(caps).not.toContain('operations.edit.document_recipient');
+    // Мгновенный получатель — тоже admin/manager: у инспектора чип остаётся
+    // в прежнем режиме «до Сохранить», а не отвечает 403.
+    expect(caps).not.toContain('operations.edit.recipient');
   });
 
   it('менеджер получает правку, но не удаление навсегда', async () => {
     const caps = capabilitiesFor(EMPTY, 'manager', await roleMap());
     expect(caps).toContain('operations.edit.flags');
     expect(caps).toContain('operations.edit.document_recipient');
+    expect(caps).toContain('operations.edit.recipient');
     expect(caps).toContain('operations.share.revoke');
     expect(caps).not.toContain('operations.delete.bulk_hard');
   });
@@ -86,6 +90,27 @@ describe('capabilities: фактический доступ, а не перес�
     expect(caps).not.toContain('operations.share.manage');
     expect(caps).not.toContain('operations.edit.contractor_directory');
     expect(caps).not.toContain('operations.edit.document_recipient');
+    expect(caps).not.toContain('operations.edit.recipient');
+  });
+
+  it('получатель сразу: возможность общая — портал обязан проверять и право страницы', async () => {
+    // operations.edit.recipient держат два маршрута — приёмки и отгрузки, а
+    // capabilitiesFor выдаёт возможность за ЛЮБОЙ из них. Монитор с правкой
+    // одних приёмок получает её, хотя PATCH отгрузки ответит ему 403, — поэтому
+    // мгновенный режим на портале = can(страница, 'edit') && возможность.
+    expect(DEFAULT_MATRIX.monitor['operations.shipments'].edit).toBe(false);
+    const onlyDeliveries = capabilitiesFor(
+      granted('monitor', 'operations.deliveries', 'edit'),
+      'monitor',
+      await roleMap(),
+    );
+    expect(onlyDeliveries).toContain('operations.edit.recipient');
+    const onlyShipments = capabilitiesFor(
+      granted('monitor', 'operations.shipments', 'edit'),
+      'monitor',
+      await roleMap(),
+    );
+    expect(onlyShipments).toContain('operations.edit.recipient');
   });
 
   it('подрядчик из справочника: менеджеру да, инспектору нет', async () => {

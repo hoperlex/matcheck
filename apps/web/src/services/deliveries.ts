@@ -121,6 +121,42 @@ export async function applyLocalEdit(
   });
 }
 
+/**
+ * Поля локальной правки, которые уходят вместе с выбором получателя в форме
+ * «до Сохранить». Признак — тоже: в этом режиме он выбирается в паре с
+ * получателем (pendingPurpose) и без него смысла не имеет.
+ */
+const LOCAL_RECIPIENT_KEYS = ['contractorId', 'recipientMolId', 'purpose'] as const;
+
+/** Есть ли в неотправленной правке выбор получателя (режим «до Сохранить»). */
+export function hasLocalRecipientEdit(r: DeliveryRecord): boolean {
+  const local = r.local;
+  return local != null && ('contractorId' in local || 'recipientMolId' in local);
+}
+
+/**
+ * Убрать выбор получателя из неотправленной правки приёмки — перед тем как
+ * сохранить получателя отдельным PATCH. Иначе лежащая в очереди старая правка
+ * (офлайн, conflictPending) ушла бы после PATCH без keepRecipient и вернула бы
+ * прежнего получателя: локальная правка живёт до ответа на upsert, снимок
+ * сервера её не трогает. Вызывать под withQueueLock (services/mutationQueue.ts):
+ * начатая отправка закончится раньше, следующая прочитает правку уже без ключей.
+ */
+export async function dropLocalRecipient(id: string): Promise<void> {
+  if (!localCacheEnabled()) return;
+  await withDb(async (dbi) => {
+    const tx = dbi.transaction('deliveries', 'readwrite');
+    const existing = await tx.store.get(id);
+    const local = existing?.local;
+    if (existing && local && LOCAL_RECIPIENT_KEYS.some((key) => key in local)) {
+      const rest: Partial<Delivery> = { ...local };
+      for (const key of LOCAL_RECIPIENT_KEYS) delete rest[key];
+      await tx.store.put({ ...existing, local: rest });
+    }
+    await tx.done;
+  });
+}
+
 export async function markTombstone(id: string): Promise<void> {
   await withDb(async (dbi) => {
     const tx = dbi.transaction('deliveries', 'readwrite');
@@ -178,6 +214,10 @@ export function buildUpsertPayload(r: DeliveryRecord, baseVersion: number): Deli
     // Только явная правка из локального overlay: обычный upsert планшета и
     // сохранение других полей не должны перезаписывать серверный признак.
     ...(r.local?.purpose != null && { purpose: r.local.purpose }),
+    // Получателя в форме не правили — он сохраняется отдельным PATCH, и сервер
+    // оставляет того, что в строке. Поля получателя выше всё равно уходят
+    // (снимок сервера): старый API флаг отбросит и запишет их, а не null.
+    ...(r.server !== null && !hasLocalRecipientEdit(r) && { keepRecipient: true }),
     vehiclePlate: effective.vehiclePlate,
     driverName: effective.driverName,
     arrivedAt: effective.arrivedAt,

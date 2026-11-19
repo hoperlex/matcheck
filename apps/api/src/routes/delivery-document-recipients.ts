@@ -24,7 +24,12 @@ import {
 import { assertPermission } from '../lib/permissions/assert.js';
 import { publishEvent } from './events.js';
 import { resetDocumentContracts } from '../domain/supplier-contracts/delivery-contract.js';
-import { documentStateOf, lockFreeEdoMatches } from '../domain/operations/delivery-purpose.js';
+import {
+  documentStateOf,
+  lockFreeEdoMatches,
+  lockPurposeForRecipientWrite,
+  type RecipientPair,
+} from '../domain/operations/delivery-purpose.js';
 
 const IdParams = z.object({ id: z.string().uuid() });
 const DocParams = IdParams.extend({ docId: z.string().uuid() });
@@ -35,11 +40,18 @@ const RecipientBody = z.union([
   z.object({ none: z.literal(true) }).strict(),
   z.object({ inherit: z.literal(true) }).strict(),
 ]);
+/** Общий получатель приёмки: «наследовать» у него не от кого. */
+const GeneralRecipientBody = z.union([
+  z.object({ contractorId: z.string().uuid() }).strict(),
+  z.object({ recipientMolId: z.string().uuid() }).strict(),
+  z.object({ none: z.literal(true) }).strict(),
+]);
 const PurposeBody = z.union([
   z.object({ purpose: DeliveryPurposeSchema }).strict(),
   z.object({ inherit: z.literal(true) }).strict(),
 ]);
 type RecipientBodyT = z.infer<typeof RecipientBody>;
+type GeneralRecipientBodyT = z.infer<typeof GeneralRecipientBody>;
 type PurposeBodyT = z.infer<typeof PurposeBody>;
 const Responses = {
   200: DeliverySchema,
@@ -94,6 +106,34 @@ function general(row: LockedDelivery) {
     recipientMolId: row.recipientMolId,
     purpose: DeliveryPurposeSchema.nullable().parse(row.purpose),
   };
+}
+
+/**
+ * Выбранный подрядчик или МОЛ есть в справочнике — иначе 422, а не ошибка
+ * внешнего ключа. Общая проверка для получателя приёмки и документа.
+ */
+async function unknownRecipient(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+  body: RecipientBodyT | GeneralRecipientBodyT,
+): Promise<{ code: 422; error: 'unknown_contractor' | 'unknown_recipient_mol' } | null> {
+  if ('contractorId' in body) {
+    const [exists] = await tx
+      .select({ id: counterparties.id })
+      .from(counterparties)
+      .where(eq(counterparties.id, body.contractorId))
+      .limit(1);
+    if (!exists) return { code: 422, error: 'unknown_contractor' };
+  }
+  if ('recipientMolId' in body) {
+    const [exists] = await tx
+      .select({ id: responsiblePersons.id })
+      .from(responsiblePersons)
+      .where(eq(responsiblePersons.id, body.recipientMolId))
+      .limit(1);
+    if (!exists) return { code: 422, error: 'unknown_recipient_mol' };
+  }
+  return null;
 }
 
 function failure(row: LockedDelivery | undefined) {
@@ -182,22 +222,8 @@ export function registerDeliveryDocumentRecipientRoutes(
       const locked = row!;
       const doc = await lockTarget(tx, locked.id, target);
       if (!doc.ok) return { code: doc.code, error: doc.error };
-      if ('contractorId' in body) {
-        const [exists] = await tx
-          .select({ id: counterparties.id })
-          .from(counterparties)
-          .where(eq(counterparties.id, body.contractorId))
-          .limit(1);
-        if (!exists) return { code: 422 as const, error: 'unknown_contractor' };
-      }
-      if ('recipientMolId' in body) {
-        const [exists] = await tx
-          .select({ id: responsiblePersons.id })
-          .from(responsiblePersons)
-          .where(eq(responsiblePersons.id, body.recipientMolId))
-          .limit(1);
-        if (!exists) return { code: 422 as const, error: 'unknown_recipient_mol' };
-      }
+      const unknown = await unknownRecipient(tx, body);
+      if (unknown) return unknown;
       const before = doc.state;
       const next: DocumentRecipientState =
         'inherit' in body
@@ -237,6 +263,67 @@ export function registerDeliveryDocumentRecipientRoutes(
       return { code: 200 as const, id: locked.id, siteId: locked.siteId };
     });
   }
+
+  /**
+   * Общий получатель приёмки — сразу, без «Сохранить» (как договор и
+   * получатель документа). Раньше он жил в форме до «Сохранить» и терялся
+   * при уходе из карточки, обновлении портала и перечитке формы (жалоба
+   * мониторинга 18.11.2026). version не поднимаем, как у /purpose и /flags:
+   * 409 на upsert планшета заблокировал бы его очередь. Устаревшую форму
+   * портала держит флаг keepRecipient у upsert.
+   */
+  app.patch(
+    '/api/v1/deliveries/:id/recipient',
+    {
+      preHandler: [app.authenticate, app.authorize('admin', 'manager')],
+      schema: { params: IdParams, body: GeneralRecipientBody, response: Responses },
+    },
+    async (req, reply) => {
+      // Роль — authorize выше, монитор проходит его расширением ячейки edit.
+      await assertPermission(req, 'operations.deliveries', 'edit');
+      const body = req.body;
+      const next: RecipientPair =
+        'contractorId' in body
+          ? { contractorId: body.contractorId, recipientMolId: null }
+          : 'recipientMolId' in body
+            ? { contractorId: null, recipientMolId: body.recipientMolId }
+            : { contractorId: null, recipientMolId: null };
+      const result = await app.db.transaction(async (tx) => {
+        const row = await lockDelivery(tx, req.params.id);
+        if (!row) return { code: 404 as const, error: 'not_found' };
+        if (row.pendingDeletionAt) return { code: 409 as const, error: 'pending_deletion' };
+        const unknown = await unknownRecipient(tx, body);
+        if (unknown) return unknown;
+        // Та же строка уже под блокировкой: helper согласует общий признак и, в
+        // режиме «Разные получатели», признаки документов — как upsert.
+        const reconciled = await lockPurposeForRecipientWrite(tx, row.id, next);
+        await tx
+          .update(deliveries)
+          .set({
+            ...next,
+            ...(reconciled && { purpose: reconciled.purpose }),
+            updatedAt: new Date(),
+          })
+          .where(eq(deliveries.id, row.id));
+        const previous = reconciled?.previous ?? {
+          contractorId: row.contractorId,
+          recipientMolId: row.recipientMolId,
+        };
+        return { code: 200 as const, id: row.id, siteId: row.siteId, previous };
+      });
+      if (result.code !== 200) return reply.code(result.code).send({ error: result.error });
+      if (
+        result.previous.contractorId !== next.contractorId ||
+        result.previous.recipientMolId !== next.recipientMolId
+      ) {
+        req.log.info(
+          { deliveryId: result.id, userId: req.user?.id ?? null, from: result.previous, to: next },
+          'delivery_recipient_set',
+        );
+      }
+      return await respond(result.id, result.siteId, req.user?.role);
+    },
+  );
 
   app.patch(
     '/api/v1/deliveries/:id/recipient-mode',

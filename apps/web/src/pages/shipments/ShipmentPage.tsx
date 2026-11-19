@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
@@ -52,6 +52,7 @@ import { advanceItemsVersion, countItemsByDocument } from '../shared/itemsVersio
 import { capturePhoto, onPhotoUploadSettled } from '../../services/photoPipeline';
 import {
   applyLocalEdit,
+  dropLocalReceiver,
   effectiveState,
   enqueueMutation,
   getShipment,
@@ -63,7 +64,7 @@ import {
 import { AssetTag } from '../../shared/ui/AssetTag';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { runSync } from '../../services/sync';
-import { flushMutation, type MutationResult } from '../../services/mutationQueue';
+import { flushMutation, withQueueLock, type MutationResult } from '../../services/mutationQueue';
 import { describeEmptyNames } from '../../shared/utils/emptyItemNames';
 import { EditableItemName } from '../shared/EditableItemName';
 import { itemNameLock } from '../shared/itemNameLock';
@@ -540,6 +541,19 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   }, [isNew, shipmentId, newFromUpdQuery.data, isInspector]);
 
   const loadedShipment: Shipment | null = virtualShipment ?? shipmentQuery.data ?? null;
+  // Получатель сохраняется сразу (PATCH /shipments/:id/recipient) — у
+  // существующей отгрузки вида «подрядчику» и при праве. Возможность общая с
+  // приёмками, поэтому нужна и правка самой страницы. Перемещение и возврат
+  // (у перемещения получатель уходит в парную приёмку) — прежний режим «до
+  // Сохранить», как и черновик и роль без права. Вид в форме сейчас не
+  // меняется (переключатель скрыт), но сверяем и его с сервером.
+  const receiverImmediate =
+    !!shipmentId &&
+    !isNew &&
+    canEditShipment &&
+    hasCapability('operations.edit.recipient') &&
+    loadedShipment?.kind === 'contractor' &&
+    kind === 'contractor';
   // Ручной вынос: без машины и госномера (сервер ставит флаг только при создании).
   const isManualEntry = isManualNew || loadedShipment?.isManual === true;
 
@@ -742,15 +756,19 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       status: nextStatus,
       kind,
       siteId: siteId ?? loadedShipment.siteId,
-      receiverCounterpartyId:
-        (kind === 'contractor' || kind === 'return' || kind === 'transfer') &&
-        receiverKind === 'counterparty'
-          ? receiverId
-          : null,
-      receiverMolId:
-        (kind === 'contractor' || kind === 'transfer') && receiverKind === 'mol'
-          ? receiverId
-          : null,
+      // В режиме «сразу» получателя в правке нет: он записан отдельным PATCH,
+      // и upsert уйдёт с keepReceiver (services/shipments.ts).
+      ...(!receiverImmediate && {
+        receiverCounterpartyId:
+          (kind === 'contractor' || kind === 'return' || kind === 'transfer') &&
+          receiverKind === 'counterparty'
+            ? receiverId
+            : null,
+        receiverMolId:
+          (kind === 'contractor' || kind === 'transfer') && receiverKind === 'mol'
+            ? receiverId
+            : null,
+      }),
       destSiteId: kind === 'transfer' ? destSiteId : null,
       vehiclePlate: isManualNew ? null : plate || null,
       driverName: isManualNew ? null : driverName || null,
@@ -993,6 +1011,79 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
     },
     onError: (err: Error) => message.error(err.message),
   });
+
+  /**
+   * Получатель — сразу (режим receiverImmediate); зеркало saveRecipient в
+   * KppPage. Перед PATCH под замком очереди убираем получателя из
+   * неотправленной правки, чтобы старое «Сохранить» из очереди не вернуло
+   * прежнего. Пока запрос идёт, чип, «Сохранить» и «Подтвердить» заблокированы.
+   */
+  const saveReceiver = useMutation({
+    mutationFn: async (
+      body: { contractorId: string } | { recipientMolId: string } | { none: true },
+    ) => {
+      if (!loadedShipment) throw new Error('Отгрузка ещё не загружена');
+      const id = loadedShipment.id;
+      await withQueueLock(() => dropLocalReceiver(id));
+      return api.patch<Shipment>(`/shipments/${id}/recipient`, body);
+    },
+    // Опрос карточки, начатый до PATCH, не должен вернуть старое состояние
+    // поверх ответа.
+    onMutate: () =>
+      queryClient.cancelQueries({ queryKey: ['shipments', shipmentId], exact: true }),
+    onSuccess: (dto) => {
+      message.success('Получатель сохранён');
+      queryClient.setQueryData(['shipments', shipmentId], dto);
+      void upsertServerSnapshot([dto]).catch(() => undefined);
+      void queryClient.invalidateQueries({
+        queryKey: ['shipments'],
+        predicate: (q) => q.queryKey[1] !== shipmentId,
+      });
+    },
+    // Блоком: thenable от message.error держал бы мутацию «идущей» ~3 с.
+    onError: (err: Error) => {
+      message.error(err.message);
+    },
+  });
+
+  // Режим «сразу»: получатель формы — серверный; ответ или ошибка PATCH
+  // возвращают сюда серверное значение (при ошибке это и есть откат).
+  const serverReceiverCounterpartyId = loadedShipment?.receiverCounterpartyId ?? null;
+  const serverReceiverMolId = loadedShipment?.receiverMolId ?? null;
+  const receiverSavePending = saveReceiver.isPending;
+  const syncReceiverFromServer = useCallback(() => {
+    if (serverReceiverMolId) {
+      setReceiverKind('mol');
+      setReceiverId(serverReceiverMolId);
+    } else {
+      setReceiverKind('counterparty');
+      setReceiverId(serverReceiverCounterpartyId);
+    }
+  }, [serverReceiverCounterpartyId, serverReceiverMolId]);
+  useEffect(() => {
+    if (!receiverImmediate || receiverSavePending) return;
+    syncReceiverFromServer();
+  }, [receiverImmediate, receiverSavePending, syncReceiverFromServer]);
+
+  // Окно чипа закрылось выбором — серверное значение принесёт ответ PATCH.
+  const receiverPickedRef = useRef(false);
+  /** Выбор получателя: в режиме «сразу» — PATCH, иначе остаётся в форме. */
+  const pickReceiver = (
+    body: { contractorId: string } | { recipientMolId: string } | { none: true },
+  ) => {
+    if (!receiverImmediate) return;
+    receiverPickedRef.current = true;
+    const next = {
+      contractorId: 'contractorId' in body ? body.contractorId : null,
+      recipientMolId: 'recipientMolId' in body ? body.recipientMolId : null,
+    };
+    if (
+      next.contractorId === serverReceiverCounterpartyId &&
+      next.recipientMolId === serverReceiverMolId
+    )
+      return;
+    saveReceiver.mutate(body);
+  };
 
   const markDel = useMutation({
     mutationFn: async (reason: string | null) => {
@@ -1570,8 +1661,19 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   label="Получатель"
                   value={receiverLabel}
                   required
-                  disabled={isContractor}
+                  disabled={isContractor || saveReceiver.isPending}
                   width={320}
+                  // Режим «сразу»: окно открывается с серверным получателем, а
+                  // закрытое без выбора возвращает его (см. KppPage).
+                  onOpenChange={
+                    receiverImmediate
+                      ? (open) => {
+                          if (open) receiverPickedRef.current = false;
+                          if (!receiverPickedRef.current && !saveReceiver.isPending)
+                            syncReceiverFromServer();
+                        }
+                      : undefined
+                  }
                 >
                   {(close) => (
                     <Space direction="vertical" size={6} style={{ width: '100%' }}>
@@ -1603,6 +1705,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                           onChange={(id, cp) => {
                             if (id && cp) setPickedReceiver({ id, name: cp.name });
                             setReceiverId(id);
+                            pickReceiver(id ? { contractorId: id } : { none: true });
                             close();
                           }}
                         />
@@ -1632,6 +1735,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                           value={receiverId ?? undefined}
                           onChange={(v) => {
                             setReceiverId(v);
+                            pickReceiver(v ? { recipientMolId: v } : { none: true });
                             close();
                           }}
                           showSearch
@@ -1983,10 +2087,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
               ? `Подтверждено: ${loadedShipment.confirmedByMolUserEmail ?? '—'}, ${formatMolDate(loadedShipment.confirmedByMolAt)}`
               : (verifyReason ?? 'Подтвердить документ как МОЛ');
           // Помеченный документ — read-only: блокируем Save и Подтвердить МОЛ.
-          const saveDisabled = !!verifyReason || isPending;
+          const saveDisabled = !!verifyReason || isPending || saveReceiver.isPending;
           // В режиме isNew подтверждение МОЛ недоступно — сначала должна
           // появиться сохранённая запись со статусом shipped.
-          const confirmDisabled = isNew || isConfirmed || !!verifyReason || isPending;
+          const confirmDisabled =
+            isNew || isConfirmed || !!verifyReason || isPending || saveReceiver.isPending;
           const canMarkDeletion =
             !isPending &&
             !isContractor &&

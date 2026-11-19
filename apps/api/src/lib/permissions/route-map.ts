@@ -253,6 +253,22 @@ const DOCUMENT_RECIPIENT: RouteRule = st('operations.deliveries', 'edit', {
   capability: 'operations.edit.document_recipient',
   expandableBy: UNSCOPED,
 });
+/**
+ * Общий получатель приёмки и получатель отгрузки — сразу, отдельным PATCH
+ * (жалоба мониторинга 18.11.2026: выбор терялся до «Сохранить»). Одна
+ * возможность на обе страницы, как у флагов: портал включает мгновенный режим
+ * только при праве edit САМОЙ страницы плюс возможности — capabilitiesFor
+ * выдаёт её за любой из маршрутов. allow-list admin/manager, monitor —
+ * расширением ячейки edit.
+ */
+const DELIVERY_RECIPIENT: RouteRule = st('operations.deliveries', 'edit', {
+  capability: 'operations.edit.recipient',
+  expandableBy: UNSCOPED,
+});
+const SHIPMENT_RECIPIENT: RouteRule = st('operations.shipments', 'edit', {
+  capability: 'operations.edit.recipient',
+  expandableBy: UNSCOPED,
+});
 const legacy = (
   page: PageId,
   action: PageAction,
@@ -368,6 +384,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   // то есть неспособным быть расширенным до настоящей правки.
   ['PATCH /api/v1/deliveries/:id/review', st('operations.deliveries', 'review')],
   ['PATCH /api/v1/deliveries/:id/purpose', st('operations.deliveries', 'review')],
+  ['PATCH /api/v1/deliveries/:id/recipient', DELIVERY_RECIPIENT],
   ['PATCH /api/v1/deliveries/:id/recipient-mode', DOCUMENT_RECIPIENT],
   ['PATCH /api/v1/deliveries/:id/sources/:docId/recipient', DOCUMENT_RECIPIENT],
   ['PATCH /api/v1/deliveries/:id/sources/:docId/purpose', st('operations.deliveries', 'review')],
@@ -545,6 +562,7 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
       expandableBy: UNSCOPED,
     }),
   ],
+  ['PATCH /api/v1/shipments/:id/recipient', SHIPMENT_RECIPIENT],
   [
     'PATCH /api/v1/shipments/:id/supplier-from-directory',
     st('operations.shipments', 'edit', {

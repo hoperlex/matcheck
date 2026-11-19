@@ -83,8 +83,10 @@ import { FOREIGN_SITE_RESPONSE, ForeignSiteError } from '../domain/operations/fo
 import { VersionConflictError } from '../domain/operations/version-conflict.js';
 import {
   lockPurposeForRecipientWrite,
+  PurposeConflictsRecipientError,
   purposeOnInsert,
   reconcileLinkedDocumentPurposes,
+  type RecipientWrite,
 } from '../domain/operations/delivery-purpose.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
@@ -1752,7 +1754,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           return reply.code(403).send({ error: 'forbidden' });
         }
         await assertPermission(req, 'operations.deliveries', 'review');
+        // При keepRecipient получатель запроса — лишь снимок формы, а не то,
+        // что ляжет в строку: признак тогда проверяет только
+        // lockPurposeForRecipientWrite под блокировкой по фактическому
+        // получателю. Без флага ранний ответ остаётся прежним.
         if (
+          input.keepRecipient !== true &&
           !allowedDeliveryPurposes(
             deliveryRecipientKind({
               contractorId: input.contractorId ?? null,
@@ -1887,6 +1894,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof InvalidManualEntryError) {
           return reply.code(400).send({ error: 'invalid_manual_entry', message: err.message });
+        }
+        // Признак не подходит получателю, который в строке под блокировкой
+        // (keepRecipient, либо получатель сменили между предпроверкой и записью).
+        if (err instanceof PurposeConflictsRecipientError) {
+          return reply.code(422).send({ error: 'purpose_conflicts_recipient' });
         }
         if (err instanceof SourceAlreadyLinkedError) {
           return reply.code(400).send({
@@ -4063,10 +4075,16 @@ async function updateDelivery(
   // одна транзакция (см. createDelivery). Раньше delete items проходил, а
   // insert падал → приёмка теряла все позиции.
   return await app.db.transaction(async (tx: typeof app.db) => {
-    const nextRecipient = {
-      contractorId: input.contractorId ?? null,
-      recipientMolId: input.recipientMolId ?? null,
-    };
+    // keepRecipient — получателя в форме портала не правили (он сохраняется
+    // отдельным PATCH): колонки получателя не пишем вовсе, иначе устаревшая
+    // форма вернула бы прежнее значение. Планшет флаг не шлёт.
+    const nextRecipient: RecipientWrite =
+      input.keepRecipient === true
+        ? 'keep'
+        : {
+            contractorId: input.contractorId ?? null,
+            recipientMolId: input.recipientMolId ?? null,
+          };
     // Первым оператором — блокировка строки и признак по её получателю: правка
     // признака (PATCH /:id/purpose) берёт ту же блокировку и не впишет «Свои
     // силы» подрядчику между чтением и записью. Нет строки — UPDATE ниже
@@ -4078,7 +4096,7 @@ async function updateDelivery(
         statusId: effectiveStatusId,
         siteId: input.siteId,
         supplierId: input.supplierId ?? null,
-        ...nextRecipient,
+        ...(nextRecipient !== 'keep' && nextRecipient),
         ...(reconciled && { purpose: reconciled.purpose }),
         vehiclePlate: input.vehiclePlate ?? null,
         driverName: input.driverName ?? null,
@@ -4122,6 +4140,28 @@ async function updateDelivery(
       // Объект записи изменился после чтения existing — маршрут отдаст 403
       // foreign_site (см. domain/operations/foreign-site.ts).
       throw new ForeignSiteError();
+    }
+    // След смены получателя через upsert: аудита получателя в базе нет, а
+    // жалобы «получатель исчез» без него не разобрать (18.11.2026). При
+    // keepRecipient получатель не меняется — писать нечего.
+    if (
+      reconciled &&
+      nextRecipient !== 'keep' &&
+      (reconciled.previous.contractorId !== reconciled.recipient.contractorId ||
+        reconciled.previous.recipientMolId !== reconciled.recipient.recipientMolId)
+    ) {
+      app.log.info(
+        {
+          deliveryId: id,
+          userId,
+          // Флаг сопоставления по названию включается ровно для запросов
+          // планшета (isMobileClient у единственного вызова).
+          client: nameOnlyFallback ? 'tablet' : 'web',
+          from: reconciled.previous,
+          to: reconciled.recipient,
+        },
+        'delivery_recipient_upsert_change',
+      );
     }
     // Группа приёмок держит один объект: перенос на другой объект выводит
     // приёмку из группы (группа из двух распускается). Тихо — ответ и коды

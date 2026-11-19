@@ -514,6 +514,17 @@ export const DeliveryUpsertSchema = z.object({
    * default: старые клиенты поле не шлют, и флаг от этого не должен меняться.
    */
   isManual: z.boolean().optional(),
+  /**
+   * Получателя в форме не правили — сервер оставляет того, что в строке, и
+   * contractorId/recipientMolId запроса не пишет. Портал сохраняет получателя
+   * отдельным PATCH /deliveries/:id/recipient, и «Сохранить» устаревшей формы
+   * (другая вкладка, офлайн-очередь) не должно возвращать прежнее значение.
+   * Учитывается только при обновлении. Без default: планшет и старый портал
+   * поле не шлют, у них получатель пишется из запроса, как раньше. Поля
+   * получателя портал шлёт и вместе с флагом — старый API флаг отбросит и
+   * запишет их (серверный снимок), а не null.
+   */
+  keepRecipient: z.boolean().optional(),
   sourceDocumentIds: z.array(z.string().uuid()).default([]),
   items: z.array(DeliveryUpsertItemSchema).default([]),
   baseVersion: z.number().int().nonnegative().optional(),
