@@ -385,6 +385,46 @@ describe('PhotoDocumentPreview — листание документов', () =>
     fireEvent.load(full);
     expect(onOriginalDisplayed).toHaveBeenCalledWith(PHOTO_A);
   });
+
+  // Правый клик по снимку — меню картинки браузера («Сохранить картинку
+  // как…»). Пока на экране миниатюра, меню закрыто: иначе сохранилась бы она.
+  it('меню картинки — только у оригинала, у миниатюры закрыто', async () => {
+    let resolveFull!: (v: { blob: Blob }) => void;
+    apiMock.download.mockImplementation(() => new Promise((resolve) => (resolveFull = resolve)));
+    render(
+      wrap(
+        <PhotoDocumentPreview open onClose={() => {}} photoId={PHOTO_A} imageSrc="blob:thumb" />,
+      ),
+    );
+    const thumb = await screen.findByAltText('Документ');
+    expect(thumb.getAttribute('src')).toBe('blob:thumb');
+    expect(thumb.style.pointerEvents).toBe('none');
+
+    await act(async () => {
+      resolveFull({ blob: new Blob(['full'], { type: 'image/jpeg' }) });
+    });
+    await waitFor(() => {
+      const el = screen.getByAltText('Документ');
+      expect(el.getAttribute('src')).not.toBe('blob:thumb');
+      expect(el.style.pointerEvents).toBe('auto');
+    });
+  });
+
+  it('оригинал не загрузился — миниатюра на экране, меню картинки закрыто', async () => {
+    apiMock.download.mockRejectedValue(new Error('s3_unavailable'));
+    render(
+      wrap(
+        <PhotoDocumentPreview open onClose={() => {}} photoId={PHOTO_A} imageSrc="blob:thumb" />,
+      ),
+    );
+    // У запроса оригинала свои два повтора (0,5 с + 1 с) — ждём дольше дефолта.
+    await screen.findByText('Оригинал не загрузился — показана миниатюра', undefined, {
+      timeout: 4000,
+    });
+    const thumb = screen.getByAltText('Документ');
+    expect(thumb.getAttribute('src')).toBe('blob:thumb');
+    expect(thumb.style.pointerEvents).toBe('none');
+  });
 });
 
 /** clientWidth/clientHeight панели зума — в jsdom они нулевые. */

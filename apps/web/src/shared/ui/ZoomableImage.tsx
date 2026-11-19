@@ -70,7 +70,11 @@ export function ZoomableImage({
 }: {
   src: string;
   alt: string;
-  /** Приглушить кадр — например, пока вместо оригинала стоит миниатюра. */
+  /**
+   * Кадр — заглушка (например, миниатюра, пока качается оригинал): приглушён,
+   * и правый клик по нему не даёт меню картинки, чтобы «Сохранить картинку
+   * как…» не сохранило мутную миниатюру вместо снимка.
+   */
   dimmed?: boolean;
   initialRotation?: number;
   onRotationChange?: (rotation: number) => void;
@@ -303,6 +307,9 @@ export function ZoomableImage({
       onPointerCancel={onPointerEnd}
       onLostPointerCapture={onPointerEnd}
       onDoubleClick={onDoubleClick}
+      // Страховка к draggable={false}: Firefox и Safari иначе могут потащить
+      // картинку как файл и сорвать перетаскивание кадра.
+      onDragStart={(e) => e.preventDefault()}
       style={{
         position: 'relative',
         width: '100%',
@@ -321,9 +328,13 @@ export function ZoomableImage({
         style={{
           ...imgStyle,
           opacity: dimmed ? 0.5 : 1,
-          // Все события — панели: так не всплывает нативное перетаскивание
-          // картинки и не теряется захват указателя.
-          pointerEvents: 'none',
+          // Картинка принимает указатель, чтобы правый клик давал меню
+          // картинки («Сохранить картинку как…», «Копировать картинку»), а не
+          // меню страницы. Жесты от этого не меняются: события с <img>
+          // всплывают в обработчики панели, захват указателя ставится на
+          // панель (currentTarget), правую кнопку onPointerDown пропускает.
+          // У заглушки меню закрыто — см. проп dimmed.
+          pointerEvents: dimmed ? 'none' : 'auto',
           userSelect: 'none',
         }}
       />

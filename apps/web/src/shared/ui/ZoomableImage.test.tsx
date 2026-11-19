@@ -335,4 +335,50 @@ describe('ZoomableImage', () => {
     expect(after.y).toBeCloseTo(before.y, 3);
     expect(after.r).toBe(90);
   });
+
+  // Правый клик по снимку должен давать меню картинки браузера («Сохранить
+  // картинку как…», «Копировать картинку»). С pointer-events: none у <img>
+  // браузер видел клик по панели и показывал меню страницы.
+  it('снимок принимает правый клик, заглушка — нет', () => {
+    const { img, rerender } = setup();
+    loadImage(img, 1536, 2048);
+    expect(img.style.pointerEvents).toBe('auto');
+    // contextmenu никто не гасит — браузер покажет своё меню.
+    expect(fireEvent.contextMenu(img)).toBe(true);
+
+    rerender(<ZoomableImage src="blob:scan" alt="Скан" dimmed />);
+    expect(screen.getByAltText('Скан').style.pointerEvents).toBe('none');
+  });
+
+  it('жесты, начатые на самой картинке, работают как на панели; правая кнопка кадр не тащит', () => {
+    const { img, panel } = setup();
+    loadImage(img, 1536, 2048);
+
+    // Двойной клик и колесо с картинки доходят до панели.
+    fireEvent.doubleClick(img, { clientX: 400, clientY: 300 });
+    expect(percent()).toBe('250%');
+    const ev = wheel(img, -100, 400, 300);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(percent()).not.toBe('250%');
+
+    // Правая кнопка — это меню, не перетаскивание.
+    const before = geom(img);
+    fireEvent.pointerDown(img, { pointerId: 1, clientX: 400, clientY: 300, button: 2 });
+    fireEvent.pointerMove(img, { pointerId: 1, clientX: 300, clientY: 200 });
+    expect(geom(img)).toEqual(before);
+    expect(panel.style.cursor).toBe('grab');
+    fireEvent.pointerUp(img, { pointerId: 1, button: 2 });
+
+    // Левая — перетаскивание, как с панели.
+    fireEvent.pointerDown(img, { pointerId: 1, clientX: 400, clientY: 300, button: 0 });
+    expect(panel.style.cursor).toBe('grabbing');
+    fireEvent.pointerMove(img, { pointerId: 1, clientX: 390, clientY: 295 });
+    expect(geom(img).x).toBeCloseTo(before.x - 10);
+    expect(geom(img).y).toBeCloseTo(before.y - 5);
+    fireEvent.pointerUp(img, { pointerId: 1 });
+    expect(panel.style.cursor).toBe('grab');
+
+    // Нативное перетаскивание картинки как файла погашено.
+    expect(fireEvent.dragStart(img)).toBe(false);
+  });
 });
