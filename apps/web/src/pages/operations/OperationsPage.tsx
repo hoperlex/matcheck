@@ -28,6 +28,7 @@ import { ExpectedOutbound } from '../shipments/ExpectedOutbound';
 import { DeliveriesHistory } from '../kpp/DeliveriesHistory';
 import { ShipmentsHistory } from '../shipments/ShipmentsHistory';
 import { operationsListQuery, readOperationsFilters } from './operationsQuery';
+import { applyOperationsTabMemory, pageUrl } from '../../shared/listMemory';
 
 // KppPage и ShipmentPage — крупные модули с собственными зависимостями
 // (IndexedDB, photoPipeline). Грузим лениво — модалка не появится без
@@ -107,20 +108,22 @@ export default function OperationsPage() {
   // красный Alert. Короткие id — свои последовательности, назначение есть
   // только у отгрузок, а delivery/shipment/new/upd/from открывали карточку
   // чужого раздела при возврате.
-  const updateUrlResetPage = (patch: Record<string, string | null>) => {
-    updateUrl({
-      ...patch,
-      page: null,
-      status: null,
-      id: null,
-      purpose: null,
-      delivery: null,
-      shipment: null,
-      new: null,
-      manual: null,
-      upd: null,
-      from: null,
+  //
+  // Страница, статус, id и назначение при этом не теряются: у каждой вкладки
+  // они свои и возвращаются из памяти списков (shared/listMemory), когда
+  // человек приходит на вкладку обратно. Период, объект и признаки — общие.
+  const updateUrlResetPage = (patch: { type?: string; tab?: string }) => {
+    const next = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(patch)) {
+      if (v) next.set(k, v);
+    }
+    for (const key of ['delivery', 'shipment', 'new', 'manual', 'upd', 'from']) next.delete(key);
+    applyOperationsTabMemory(next, {
+      type: next.get('type') === 'shipment' ? 'shipment' : 'delivery',
+      tab: next.get('tab') === 'accepted' ? 'accepted' : 'expected',
     });
+    // Одним setParams: два вызова за такт затёрли бы друг друга.
+    setParams(next, { replace: true });
   };
 
   // В режиме отдельной страницы редактору тоже нужен URL текущего списка:
@@ -254,16 +257,19 @@ export default function OperationsPage() {
   // пришли оттуда). Modal видит open=false на следующем рендере и
   // закрывается. Никакого closing/afterClose — нет места, где модалка
   // могла бы «вернуться» на кадр.
+  //
+  // В Историю — с её фильтрами (shared/listMemory) и replace: «Назад»
+  // браузера после закрытия не должен снова открывать карточку.
   const closeDeliveryModal = () => {
     if (params.get('from') === 'materials') {
-      navigate('/materials');
+      navigate(pageUrl('/materials'), { replace: true });
       return;
     }
     updateUrl({ delivery: null, new: null, manual: null, upd: null, from: null });
   };
   const closeShipmentModal = () => {
     if (params.get('from') === 'materials') {
-      navigate('/materials');
+      navigate(pageUrl('/materials'), { replace: true });
       return;
     }
     updateUrl({ shipment: null, new: null, manual: null, upd: null, from: null });

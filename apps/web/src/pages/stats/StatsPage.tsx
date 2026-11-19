@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Collapse, DatePicker, Space, Typography, type TableProps } from 'antd';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import dayjs, { type Dayjs } from 'dayjs';
 import type {
   InspectorOptionsResponse,
@@ -14,6 +15,9 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { FilterSelect } from '../../shared/ui/FilterSelect';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { ResetFiltersButton } from '../../shared/ui/ResetFiltersButton';
+import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
+import { patchSearchParams, type SearchParamsPatch } from '../../shared/utils/searchParams';
 
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { KpiStrip } from './widgets/KpiStrip';
@@ -39,6 +43,15 @@ function asStatsSort(key: unknown): StatsSort | null {
 
 const SUMMARY_OPEN_KEY = 'matcheck:stats:summary-open';
 
+/** Ключи, которые снимает «Сбросить». Сортировка — не фильтр, остаётся. */
+const STATS_FILTER_KEYS = ['site', 'inspector', 'dfrom', 'dto'] as const;
+
+// День периода из адреса. Мусор из подправленной руками ссылки не должен
+// превратиться в Invalid Date и уйти на сервер.
+function dayParam(raw: string | null): string | null {
+  return raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) && dayjs(raw).isValid() ? raw : null;
+}
+
 // Имя инспектора в таблице: ФИО, иначе email (на случай если ФИО ещё
 // не заполнено в Администрирование → Пользователи).
 function inspectorName(r: InspectorStatsRow): string {
@@ -53,11 +66,39 @@ function formatDate(v: string): string {
 }
 
 export default function StatsPage() {
-  const [siteIds, setSiteIds] = useState<string[]>([]);
-  const [inspectorIds, setInspectorIds] = useState<string[]>([]);
+  // Период, объекты, инспекторы, страница и сортировка — в адресе. В useState
+  // они пропадали при любом уходе со страницы, даже кнопкой «Назад» после
+  // перехода по плашке «Требует внимания».
+  const [params, setParams] = useSearchParams();
+  const siteIds = parseCsvIds(params.get('site'));
+  const inspectorIds = parseCsvIds(params.get('inspector'));
+  const fromDay = dayParam(params.get('dfrom'));
+  const toDay = dayParam(params.get('dto'));
   // Диапазон в локальной TZ браузера; на бэк отправляем ISO с TZ — он
   // сам нарежет по МСК-границам через AT TIME ZONE.
-  const [range, setRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
+  const range = useMemo<[Dayjs | null, Dayjs | null] | null>(
+    () =>
+      fromDay || toDay ? [fromDay ? dayjs(fromDay) : null, toDay ? dayjs(toDay) : null] : null,
+    [fromDay, toDay],
+  );
+  // Единственная точка записи: одно изменение адреса на действие.
+  const updateParams = (patch: SearchParamsPatch) => {
+    setParams(patchSearchParams(params, patch), { replace: true });
+  };
+  // Смена фильтра — с первой страницы.
+  const updateFilters = (patch: {
+    siteIds?: string[];
+    inspectorIds?: string[];
+    range?: { from: string | null; to: string | null };
+  }) => {
+    updateParams({
+      site: 'siteIds' in patch ? toCsvIds(patch.siteIds) : undefined,
+      inspector: 'inspectorIds' in patch ? toCsvIds(patch.inspectorIds) : undefined,
+      dfrom: patch.range ? patch.range.from : undefined,
+      dto: patch.range ? patch.range.to : undefined,
+      page: null,
+    });
+  };
 
   // Сворачиваемое состояние сводки — помним между сессиями. Если
   // пользователь свернул, не раскрываем обратно при каждом refetch.
@@ -109,12 +150,12 @@ export default function StatsPage() {
   // запроса, и раньше половина истории была недоступна — за пределы первых 500
   // строк нельзя было ни пролистать, ни отсортироваться.
   const PAGE_SIZE = 100;
-  const [page, setPage] = useState(1);
-  const [sort, setSort] = useState<StatsSort | null>(null);
-  const [order, setOrder] = useState<'asc' | 'desc'>('desc');
-  useEffect(() => {
-    setPage(1);
-  }, [siteIds, inspectorIds, dateFrom, dateTo]);
+  const pageRaw = Number.parseInt(params.get('page') ?? '', 10);
+  const page = Number.isFinite(pageRaw) && pageRaw > 1 ? pageRaw : 1;
+  const sort = asStatsSort(params.get('sort'));
+  const order: 'asc' | 'desc' = sort && params.get('order') === 'asc' ? 'asc' : 'desc';
+  // Страница сбрасывается в updateFilters, а не эффектом по фильтрам: эффект
+  // срабатывал бы и при заходе, стирая восстановленный номер страницы.
   const statsQuery = useQuery({
     queryKey: [
       'reports',
@@ -171,9 +212,12 @@ export default function StatsPage() {
     const nextSort = single?.order ? asStatsSort(single.columnKey ?? single.field) : null;
     const nextOrder: 'asc' | 'desc' = single?.order === 'ascend' ? 'asc' : 'desc';
     const changed = nextSort !== sort || nextOrder !== order;
-    setSort(nextSort);
-    setOrder(nextOrder);
-    setPage(changed ? 1 : (tablePagination.current ?? 1));
+    const nextPage = changed ? 1 : (tablePagination.current ?? 1);
+    updateParams({
+      sort: nextSort,
+      order: nextSort ? nextOrder : null,
+      page: nextPage > 1 ? String(nextPage) : null,
+    });
   };
 
   const inspectorOptions = useMemo(
@@ -204,7 +248,14 @@ export default function StatsPage() {
           <Space wrap>
             <DatePicker.RangePicker
               value={range as [Dayjs, Dayjs] | null}
-              onChange={(v) => setRange(v as [Dayjs | null, Dayjs | null] | null)}
+              onChange={(v) =>
+                updateFilters({
+                  range: {
+                    from: v?.[0] ? v[0].format('YYYY-MM-DD') : null,
+                    to: v?.[1] ? v[1].format('YYYY-MM-DD') : null,
+                  },
+                })
+              }
               // Период с одной границей приходит из воронки «Дата» («с 01.10»):
               // без allowEmpty поле панели не смогло бы его показать.
               allowEmpty={[true, true]}
@@ -235,7 +286,7 @@ export default function StatsPage() {
               width={240}
               placeholder="Все объекты"
               value={siteIds}
-              onChange={setSiteIds}
+              onChange={(ids) => updateFilters({ siteIds: ids })}
               loading={sites.isLoading}
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
@@ -247,9 +298,15 @@ export default function StatsPage() {
               width={240}
               placeholder="Все инспекторы"
               value={inspectorIds}
-              onChange={setInspectorIds}
+              onChange={(ids) => updateFilters({ inspectorIds: ids })}
               loading={inspectors.isLoading}
               options={inspectorOptions}
+            />
+            <ResetFiltersButton
+              disabled={!STATS_FILTER_KEYS.some((key) => params.has(key))}
+              onReset={() =>
+                updateParams({ site: null, inspector: null, dfrom: null, dto: null, page: null })
+              }
             />
           </Space>
         }
@@ -330,10 +387,9 @@ export default function StatsPage() {
               ...externalColumnFilter<InspectorStatsRow>({
                 kind: 'dates',
                 title: 'Дата',
-                from: range?.[0] ? range[0].format('YYYY-MM-DD') : null,
-                to: range?.[1] ? range[1].format('YYYY-MM-DD') : null,
-                onApply: ({ from, to }) =>
-                  setRange(from || to ? [from ? dayjs(from) : null, to ? dayjs(to) : null] : null),
+                from: fromDay,
+                to: toDay,
+                onApply: ({ from, to }) => updateFilters({ range: { from, to } }),
               }),
               render: (v: string) => formatDate(v),
             },
@@ -346,7 +402,7 @@ export default function StatsPage() {
                 options: inspectorOptions,
                 loading: inspectors.isLoading,
                 value: inspectorIds,
-                onApply: setInspectorIds,
+                onApply: (ids) => updateFilters({ inspectorIds: ids }),
               }),
               render: (_: unknown, r: InspectorStatsRow) => inspectorName(r),
             },
@@ -359,7 +415,7 @@ export default function StatsPage() {
                 options: siteOptions,
                 loading: sites.isLoading,
                 value: siteIds,
-                onApply: setSiteIds,
+                onApply: (ids) => updateFilters({ siteIds: ids }),
               }),
               render: (_: unknown, r: InspectorStatsRow) => `${r.siteCode} · ${r.siteName}`,
             },

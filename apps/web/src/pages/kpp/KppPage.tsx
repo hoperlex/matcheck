@@ -127,7 +127,11 @@ import {
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { operationsListQuery, readOperationsFilters } from '../operations/operationsQuery';
-import { closedOperationListUrl, savedOperationListUrl } from '../operations/savedOperationListUrl';
+import {
+  closedOperationListUrl,
+  purgedOperationListUrl,
+  savedOperationListUrl,
+} from '../operations/savedOperationListUrl';
 import { OperationItemsSections } from '../shared/OperationItemsSections';
 import { OperationDocumentValidationAlert } from '../shared/OperationDocumentValidationAlert';
 import { OperationDocumentsChips } from '../shared/OperationDocumentsChips';
@@ -223,7 +227,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   const deliveryId = params.get('delivery');
   const fromAccepted = params.get('from') === 'accepted';
   const tab: ListTab = params.get('tab') === 'accepted' ? 'accepted' : 'expected';
-  const closeDelivery = () => navigate(closedOperationListUrl(params, 'delivery'));
+  // replace: «Назад» браузера после закрытия не должен снова открывать карточку.
+  const closeDelivery = () =>
+    navigate(closedOperationListUrl(params, 'delivery'), { replace: true });
   // Режим «новой несохранённой формы»: запись в IDB/БД ещё не создана.
   // UUID лежит в deliveryId, а флаг new=1 отключает deliveryQuery и активирует
   // ветку creation в save-mutation (первый «Сохранить» создаёт документ filled).
@@ -1113,7 +1119,9 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       message.success(successText);
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
-      navigate(savedOperationListUrl(params, 'delivery'));
+      // replace: «Назад» не должен снова открывать форму — у новой приёмки
+      // это была бы форма с уже использованным id.
+      navigate(savedOperationListUrl(params, 'delivery'), { replace: true });
       return;
     }
     if (result.outcome === 'queued') {
@@ -1645,7 +1653,8 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       void queryClient.invalidateQueries({ queryKey: ['deliveries'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
-      navigate('/operations?type=delivery&tab=accepted&trash=1');
+      // В корзину «Принятых» — с теми же фильтрами списка.
+      navigate(purgedOperationListUrl(params, 'delivery'), { replace: true });
     },
     onError: (err: Error) => message.error(err.message),
   });

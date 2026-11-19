@@ -28,6 +28,7 @@ import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { ResponsiblePersonDrawer } from './ResponsiblePersonDrawer';
+import { useUrlParam } from '../../shared/hooks/useUrlParam';
 
 type List = { items: ResponsiblePerson[]; total: number };
 
@@ -35,7 +36,8 @@ export default function ResponsiblePersonsPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ResponsiblePerson | null>(null);
-  const [search, setSearch] = useState('');
+  // Поиск — в адресе: переживает переключение вкладок и уход из раздела.
+  const [search, setSearch] = useUrlParam('q');
   const [importOpen, setImportOpen] = useState(false);
   // Права страницы. До включения матрицы значения те же, что были у ролей
   // (правит manager, удаляет admin) — так задан дефолт в PAGE_CATALOG.

@@ -107,7 +107,12 @@ import {
   dispatcherConfirmTitle,
   dispatcherCountsOf,
 } from './dispatcherBulk';
-import { operationsListQuery, parseEntry } from '../operations/operationsQuery';
+import {
+  hasOperationsFilters,
+  operationsListQuery,
+  parseEntry,
+  withoutOperationsFilters,
+} from '../operations/operationsQuery';
 import {
   formatDocumentsShort,
   sumDocumentTotals,
@@ -1123,6 +1128,10 @@ export function DeliveriesHistory({
             <ListFilters
               value={{ ...filters, supplierIds: supplierIdsShown }}
               onChange={updateFilters}
+              // Все фильтры разом, одним изменением адреса. Вкладка, тип и
+              // «Удалённые» остаются: это режимы, а не фильтры.
+              onReset={() => setParams(withoutOperationsFilters(params), { replace: true })}
+              resetDisabled={!hasOperationsFilters(params)}
               // Подрядчик видит один свой срез — справочные фильтры ему не нужны
               // (и справочники для них закрыты). Поиск, авто и даты — оставляем:
               // они работают внутри его среза.

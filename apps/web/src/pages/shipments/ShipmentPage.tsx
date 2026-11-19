@@ -88,7 +88,11 @@ import { LinkSourceDocumentModal } from '../shared/LinkSourceDocumentModal';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { UnitSelect } from '../../shared/ui/UnitSelect';
 import { CustomerCounterpartySelect } from '../inbox/CustomerCounterpartySelect';
-import { savedOperationListUrl } from '../operations/savedOperationListUrl';
+import {
+  closedOperationListUrl,
+  purgedOperationListUrl,
+  savedOperationListUrl,
+} from '../operations/savedOperationListUrl';
 
 type DraftItem = {
   clientKey: string;
@@ -184,6 +188,11 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
   const [params, setParams] = useSearchParams();
   const shipmentId = params.get('shipment');
   const fromList = params.get('from') === 'list';
+  // «Отмена» — к тому же списку с теми же вкладкой, страницей и фильтрами, как
+  // у приёмки. Раньше кнопка вела на голый ?type=shipment и сбрасывала всё.
+  // replace: «Назад» браузера после закрытия не открывает карточку снова.
+  const closeShipment = () =>
+    navigate(closedOperationListUrl(params, 'shipment'), { replace: true });
   // Дефолт — 'accepted' (не ломаем привычку: страница и раньше открывалась
   // на истории отгрузок). Вкладка 'expected' появляется только при явном tab=expected.
   const tab: ListTab = params.get('tab') === 'expected' ? 'expected' : 'accepted';
@@ -859,8 +868,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       // Вкладка «Принятые» — там сохранённая отгрузка и появится. Без
       // tab=accepted попадаем на «Ожидаемые» (default) и ищем запись там, где
-      // её нет.
-      navigate(savedOperationListUrl(params, 'shipment'));
+      // её нет. replace: «Назад» не должен снова открывать форму.
+      navigate(savedOperationListUrl(params, 'shipment'), { replace: true });
       return;
     }
     if (result.outcome === 'queued') {
@@ -1123,7 +1132,8 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
       void queryClient.invalidateQueries({ queryKey: ['shipments'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
-      navigate('/operations?type=shipment&tab=accepted&trash=1');
+      // В корзину «Принятых» — с теми же фильтрами списка.
+      navigate(purgedOperationListUrl(params, 'shipment'), { replace: true });
     },
     onError: (err: Error) => message.error(err.message),
   });
@@ -2146,7 +2156,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                   ⚠ {verifyReason}
                 </Typography.Text>
               )}
-              <Button onClick={() => navigate('/operations?type=shipment')}>Отмена</Button>
+              <Button onClick={closeShipment}>Отмена</Button>
               {markBlock}
               {!isContractor && (
                 <>
@@ -2194,11 +2204,7 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
                 gap: 8,
               }}
             >
-              <Button
-                size="large"
-                style={{ flex: 1 }}
-                onClick={() => navigate('/operations?type=shipment')}
-              >
+              <Button size="large" style={{ flex: 1 }} onClick={closeShipment}>
                 Отмена
               </Button>
               {markBlock && <span style={{ flex: 1, display: 'inline-flex' }}>{markBlock}</span>}

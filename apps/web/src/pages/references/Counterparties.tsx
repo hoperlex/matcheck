@@ -25,6 +25,7 @@ import { stringSorter } from '../../shared/ui/tableSorters';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
+import { useUrlParam } from '../../shared/hooks/useUrlParam';
 
 type List = { items: Counterparty[]; total: number };
 
@@ -33,7 +34,8 @@ export default function CounterpartiesPage() {
   const [open, setOpen] = useState(false);
   // null — режим создания, иначе редактируется конкретная запись.
   const [editing, setEditing] = useState<Counterparty | null>(null);
-  const [search, setSearch] = useState('');
+  // Поиск — в адресе: переживает переключение вкладок и уход из раздела.
+  const [search, setSearch] = useUrlParam('q');
   const [form] = Form.useForm<CounterpartyUpsert>();
 
   const list = useQuery({

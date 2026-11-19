@@ -6,6 +6,7 @@ import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from '../shared/ui/ProtectedRoute';
 import { NoAccess } from '../shared/ui/NoAccess';
 import { homePath } from './layout/navItems';
+import { sectionUrl } from '../shared/listMemory';
 import type { PageId } from '@matcheck/contracts';
 import { canView } from '../shared/utils/permissions';
 import { useAuthStore } from '../stores/auth';
@@ -64,8 +65,10 @@ function HomeRedirect() {
   const home = homePath(perms, role);
   if (!home) return <NoAccess title="Нет доступных разделов" />;
   // Операции живут на одном роуте с ?type=: без параметра страница не знает,
-  // какую вкладку открывать.
-  return <Navigate to={home === '/operations' ? '/operations?type=delivery' : home} replace />;
+  // какую вкладку открывать. Если раздел уже открывали в этой вкладке
+  // браузера — возвращаемся туда, где его оставили (shared/listMemory).
+  const fallback = home === '/operations' ? '/operations?type=delivery' : home;
+  return <Navigate to={sectionUrl(home, fallback)} replace />;
 }
 
 /**

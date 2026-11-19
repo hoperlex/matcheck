@@ -27,6 +27,7 @@ import { usePermissions } from '../../shared/hooks/usePermissions';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
+import { useUrlParam } from '../../shared/hooks/useUrlParam';
 
 const SYSTEM_SITE_ID = '00000000-0000-0000-0000-000000000001';
 
@@ -36,7 +37,8 @@ export default function SitesPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Site | null>(null);
-  const [search, setSearch] = useState('');
+  // Поиск — в адресе: переживает переключение вкладок и уход из раздела.
+  const [search, setSearch] = useUrlParam('q');
   const [form] = Form.useForm<SiteUpsert>();
   // Права страницы: до включения матрицы значения совпадают с прежними
   // (admin+manager правят, удаляет только admin) — их задаёт дефолт

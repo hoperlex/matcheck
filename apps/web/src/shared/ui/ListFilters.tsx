@@ -4,6 +4,7 @@ import type { Dayjs } from 'dayjs';
 import type { Counterparty, Site } from '@matcheck/contracts';
 import { DebouncedSearch } from './DebouncedSearch';
 import { FilterSelect } from './FilterSelect';
+import { ResetFiltersButton } from './ResetFiltersButton';
 
 export type ListFilterField =
   | 'displayId'
@@ -83,6 +84,13 @@ export interface ListFiltersProps {
    * экранах вместе с остальными фильтрами, без поломки layout.
    */
   tail?: ReactNode;
+  /**
+   * «Сбросить» — снять все фильтры списка одним действием. Кнопка рисуется,
+   * если передан onReset, и стоит на месте всегда: без активных фильтров она
+   * неактивна (resetDisabled), а не исчезает — иначе панель прыгала бы.
+   */
+  onReset?: () => void;
+  resetDisabled?: boolean;
 }
 
 // Ширины полей панели. Все фиксированные — почему именно так, см. FilterSelect
@@ -128,6 +136,8 @@ export function ListFilters({
   datesPlaceholder,
   extra,
   tail,
+  onReset,
+  resetDisabled,
 }: ListFiltersProps) {
   const showDisplayId = fields.includes('displayId');
   const showContractor = fields.includes('contractor');
@@ -232,6 +242,7 @@ export function ListFilters({
         />
       )}
       {tail}
+      {onReset && <ResetFiltersButton onReset={onReset} disabled={resetDisabled ?? false} />}
       {extra}
     </Space>
   );

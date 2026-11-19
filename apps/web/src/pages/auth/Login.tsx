@@ -8,7 +8,7 @@ import { localizeApiError } from '../../services/errorMessages';
 import { useAuthStore } from '../../stores/auth';
 import { AuthLayout } from './AuthLayout';
 
-type LocationState = { from?: { pathname: string } };
+type LocationState = { from?: { pathname: string; search?: string } };
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -30,7 +30,10 @@ export default function LoginPage() {
       // лишь дожидаемся её (single-flight, один сетевой запрос). Отказ не
       // блокирует вход — работаем по дефолтам, сервер всё равно проверяет сам.
       await syncPermissions(res.user);
-      const from = (location.state as LocationState | null)?.from?.pathname ?? '/';
+      // Вместе с query: после истечения сессии человек возвращается к тому же
+      // списку с теми же фильтрами, а не к голому разделу.
+      const fromState = (location.state as LocationState | null)?.from;
+      const from = fromState ? `${fromState.pathname}${fromState.search ?? ''}` : '/';
       navigate(from, { replace: true });
     } catch (err) {
       setError(localizeApiError(err, 'Ошибка входа'));

@@ -10,6 +10,7 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter } from 'react-router-dom';
 import { App } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -56,16 +57,21 @@ const LOSEV = {
 };
 
 function route(url: string) {
-  if (url === '/mol') return Promise.resolve({ items: [], total: 0, stale: false, fetchedAt: null });
+  if (url === '/mol')
+    return Promise.resolve({ items: [], total: 0, stale: false, fetchedAt: null });
   if (url.startsWith('/responsible-persons')) return Promise.resolve({ items: [], total: 0 });
   return Promise.reject(new Error(`unexpected GET ${url}`));
 }
 
 function renderPage() {
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
       <App>
-        <MolPersons />
+        <MemoryRouter>
+          <MolPersons />
+        </MemoryRouter>
       </App>
     </QueryClientProvider>,
   );
@@ -107,7 +113,12 @@ describe('Справочники → МОЛ: добавленные вручну
   });
 
   it('пустой кэш: «existing» с сервера — «Уже есть», запись не создаётся заново', async () => {
-    apiPost.mockResolvedValue({ ...LOSEV, fullName: 'Пиронов Ф.Б.', isActive: true, outcome: 'existing' });
+    apiPost.mockResolvedValue({
+      ...LOSEV,
+      fullName: 'Пиронов Ф.Б.',
+      isActive: true,
+      outcome: 'existing',
+    });
     renderPage();
     await submitNew('Пиронов Ф.Б.');
     expect(await screen.findByText('Уже есть в справочнике: Пиронов Ф.Б.')).toBeTruthy();
@@ -116,7 +127,12 @@ describe('Справочники → МОЛ: добавленные вручну
   });
 
   it('«created» с сервера — «МОЛ добавлен»', async () => {
-    apiPost.mockResolvedValue({ ...LOSEV, fullName: 'Доброход Н.О.', isActive: true, outcome: 'created' });
+    apiPost.mockResolvedValue({
+      ...LOSEV,
+      fullName: 'Доброход Н.О.',
+      isActive: true,
+      outcome: 'created',
+    });
     renderPage();
     await submitNew('Доброход Н.О.');
     expect(await screen.findByText('МОЛ добавлен')).toBeTruthy();
@@ -153,7 +169,9 @@ describe('Справочники → МОЛ: добавленные вручну
     renderPage();
     await submitNew('Лосев Б.С.');
     expect(
-      await screen.findByText('Вернуть её может пользователь с правом редактирования справочника МОЛ.'),
+      await screen.findByText(
+        'Вернуть её может пользователь с правом редактирования справочника МОЛ.',
+      ),
     ).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Вернуть из архива' })).toBeNull();
     expect(apiPatch).not.toHaveBeenCalled();

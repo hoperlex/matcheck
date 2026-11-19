@@ -31,6 +31,7 @@ import { ObserverSitesSelect } from './ObserverSitesSelect';
 import { PasswordResetLinkModal } from './PasswordResetLinkModal';
 import { formatDateRu, formatDateTimeRu } from '../../shared/utils/formatRu';
 import { usePermissions } from '../../shared/hooks/usePermissions';
+import { useUrlParam } from '../../shared/hooks/useUrlParam';
 
 // Список ролей выбора. Дубль UserRoleSchema: компилятор его не сверяет, а
 // typecheck веба сейчас не проверяет файлы вовсе (корневой tsconfig с
@@ -66,7 +67,8 @@ export default function AdminUsersPage() {
   // Поиск — client-side: бэк /admin/users отдаёт плоский UserDto[] без
   // пагинации, на проде типично ~40-50 пользователей. Server-side q-фильтр
   // тут — overkill: лишний round-trip без выгоды по производительности.
-  const [search, setSearch] = useState('');
+  // Поиск — в адресе: переживает переключение вкладок и уход из раздела.
+  const [search, setSearch] = useUrlParam('q');
   const list = useQuery({
     queryKey: ['admin', 'users'],
     queryFn: () => api.get<UserDto[]>('/admin/users'),

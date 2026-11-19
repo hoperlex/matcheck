@@ -9,6 +9,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { patchSearchParams } from '../../shared/utils/searchParams';
+import { pageUrl } from '../../shared/listMemory';
 import { MailFetchProblems } from './MailFetchProblems';
 import { MailReviewModal } from './MailReviewModal';
 
@@ -112,7 +113,10 @@ export default function MailReview() {
                 activeKey="mail"
                 onChange={(k) => {
                   if (k === 'mail') return;
-                  navigate(k === 'outbound' ? '/documents?direction=outbound' : '/documents');
+                  // Назад в «Документы» — с их фильтрами, а не с нуля.
+                  navigate(
+                    pageUrl('/documents', { direction: k === 'outbound' ? 'outbound' : null }),
+                  );
                 }}
               />
             </div>

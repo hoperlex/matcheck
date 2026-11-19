@@ -7,6 +7,7 @@ import type {
   SupplierOrderCandidateDetail,
 } from '@matcheck/contracts';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { operationCardUrl } from '../../shared/listMemory';
 import { APPROVAL_STATE_COLORS, approvalText, formatMsk, stageLabel } from '../../shared/utils/estimatOrder';
 
 type ItemsQuery = Pick<UseQueryResult<EstimatOrderItemsResponse>, 'data' | 'isLoading' | 'isError' | 'refetch'>;
@@ -153,7 +154,9 @@ export function SupplierOrderDetails({
             {o.deliveries.map((d) => (
               <Space key={d.deliveryId} size={6} wrap>
                 <Link
-                  to={`/operations?type=delivery&delivery=${d.deliveryId}`}
+                  // Под карточкой — запомненный список «Операций»: после
+                  // закрытия человек видит свои фильтры, а не голый список.
+                  to={operationCardUrl('delivery', d.deliveryId)}
                   target={deliveryLinkTarget}
                   rel={deliveryLinkTarget ? 'noopener noreferrer' : undefined}
                 >

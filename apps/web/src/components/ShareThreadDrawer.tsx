@@ -21,6 +21,7 @@ import type {
 } from '@matcheck/contracts';
 import { api } from '../services/api';
 import { formatDateRu } from '../shared/utils/formatRu';
+import { operationCardUrl } from '../shared/listMemory';
 
 /**
  * Drawer чата по share-ссылке. Открывается из NotificationsBell.
@@ -143,10 +144,12 @@ export function ShareThreadDrawer({
 
   const openInOperations = () => {
     if (!thread) return;
+    // Карточка открывается поверх запомненного списка «Операций», чтобы
+    // после закрытия не терялись его фильтры (shared/listMemory).
     const url =
       thread.entityType === 'delivery'
-        ? `/operations?type=delivery&delivery=${thread.entityId}&from=accepted`
-        : `/operations?type=shipment&shipment=${thread.entityId}&from=list`;
+        ? operationCardUrl('delivery', thread.entityId, 'accepted')
+        : operationCardUrl('shipment', thread.entityId, 'list');
     onClose();
     navigate(url);
   };

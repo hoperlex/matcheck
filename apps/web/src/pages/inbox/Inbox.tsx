@@ -78,6 +78,7 @@ import { SourceDocumentDetailModal } from './SourceDocumentDetailModal';
 import { UpdResolveDuplicateModal } from './UpdResolveDuplicateModal';
 import { contractorFilterOptions } from '../shared/contractorFilterOptions';
 import { useSupplierFilterOptions } from '../shared/useSupplierFilterOptions';
+import { pageUrl } from '../../shared/listMemory';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 type Row = List['items'][number];
@@ -448,6 +449,21 @@ const COLUMN_TO_SORT_FIELD: Record<string, SortField> = {
   vatSum: 'vatSum',
   totalSum: 'totalSum',
 };
+
+/** Ключи адреса, которые снимает «Сбросить» в «Документах». */
+const DOCUMENTS_FILTER_KEYS = [
+  'contractor',
+  'supplier',
+  'site',
+  'q',
+  'attention',
+  'mismatch',
+  'kind',
+  'docFrom',
+  'docTo',
+  'expFrom',
+  'expTo',
+] as const;
 
 export default function InboxPage() {
   const [params, setParams] = useSearchParams();
@@ -1376,12 +1392,14 @@ export default function InboxPage() {
                   items={docsTabs}
                   activeKey={direction}
                   onChange={(k) => {
+                    // Соседние вкладки — отдельные страницы: открываем их с
+                    // тем, что на них оставили (shared/listMemory).
                     if (k === 'mail') {
-                      navigate('/documents/mail');
+                      navigate(pageUrl('/documents/mail'));
                       return;
                     }
                     if (k === 'extra-only') {
-                      navigate('/documents/extra-only');
+                      navigate(pageUrl('/documents/extra-only'));
                       return;
                     }
                     updateParams({ direction: k === 'outbound' ? 'outbound' : null, page: null });
@@ -1414,6 +1432,13 @@ export default function InboxPage() {
             <ListFilters
               value={{ ...filters, supplierIds: supplierIdsShown }}
               onChange={updateFilters}
+              // Все фильтры разом; вкладка (направление) и сортировка остаются.
+              onReset={() =>
+                updateParams(
+                  Object.fromEntries([...DOCUMENTS_FILTER_KEYS, 'page'].map((k) => [k, null])),
+                )
+              }
+              resetDisabled={!DOCUMENTS_FILTER_KEYS.some((key) => params.has(key))}
               // Подрядчик: только поиск (справочные фильтры не нужны и закрыты).
               fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
               contractorOptions={contractorOptions}
@@ -1512,13 +1537,10 @@ export default function InboxPage() {
                 // как раньше, иначе пагинатор схлопнулся бы в одну страницу.
                 Math.max(
                   1,
-                  Math.ceil(
-                    ((list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0)) / PAGE_SIZE,
-                  ),
+                  Math.ceil(((list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0)) / PAGE_SIZE),
                 )) * PAGE_SIZE,
             showSizeChanger: false,
-            showTotal: () =>
-              `Всего: ${(list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0)}`,
+            showTotal: () => `Всего: ${(list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0)}`,
           }}
           onChange={handleTableChange}
           numberedOffset={(page - 1) * PAGE_SIZE}
@@ -1539,7 +1561,9 @@ export default function InboxPage() {
             // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
             showExpandColumn: false,
             expandedRowKeys: expandedIds,
-            expandedRowRender: (r) => <ExpandedSourceDocumentItems id={r.id} kind={r.kind} withVat />,
+            expandedRowRender: (r) => (
+              <ExpandedSourceDocumentItems id={r.id} kind={r.kind} withVat />
+            ),
           }}
           // Карточки у принятого файла не существует — открывать нечего.
           onRowClick={(r) => {

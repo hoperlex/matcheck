@@ -58,7 +58,12 @@ import { partyCell } from '../../shared/ui/documentPartyColumns';
 import { externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { useStatusFilterOptions } from '../../shared/hooks/useStatusFilterOptions';
 import { OperationsRowLegend } from '../operations/OperationsRowLegend';
-import { operationsListQuery, parseEntry } from '../operations/operationsQuery';
+import {
+  hasOperationsFilters,
+  operationsListQuery,
+  parseEntry,
+  withoutOperationsFilters,
+} from '../operations/operationsQuery';
 import {
   formatDocumentsShort,
   sumDocumentTotals,
@@ -785,6 +790,10 @@ export function ShipmentsHistory({
             <ListFilters
               value={{ ...filters, supplierIds: supplierIdsShown }}
               onChange={updateFilters}
+              // Все фильтры разом, одним изменением адреса. Вкладка, тип и
+              // «Удалённые» остаются: это режимы, а не фильтры.
+              onReset={() => setParams(withoutOperationsFilters(params), { replace: true })}
+              resetDisabled={!hasOperationsFilters(params)}
               // Подрядчик видит один свой срез — справочные фильтры скрыты.
               // Поиск, авто и даты работают внутри его среза.
               fields={

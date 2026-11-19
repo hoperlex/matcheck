@@ -1,9 +1,10 @@
-import { useState } from 'react';
 import { Alert, Card, Empty, Pagination, Space, Spin, Typography } from 'antd';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { pageUrl } from '../../shared/listMemory';
+import { useUrlPage } from '../../shared/hooks/useUrlParam';
 import { apiGetExtraOnlyBundles } from '../../services/api';
 import { ExtraFilesBlock } from './ExtraFilesBlock';
 import { formatDateRu } from '../../shared/utils/formatRu';
@@ -22,7 +23,8 @@ export default function ExtraOnlyBundles() {
   // фильтров нет — без листания старые были бы недоступны совсем, хотя счётчик
   // в заголовке их считает.
   const PAGE_SIZE = 50;
-  const [page, setPage] = useState(1);
+  // Страница — в адресе: возврат со вкладок «Документов» её не теряет.
+  const [page, setPage] = useUrlPage();
   const query = useQuery({
     queryKey: ['extra-only-bundles', page],
     queryFn: () => apiGetExtraOnlyBundles({ limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE }),
@@ -49,7 +51,10 @@ export default function ExtraOnlyBundles() {
               activeKey="extra-only"
               onChange={(k) => {
                 if (k === 'extra-only') return;
-                navigate(k === 'outbound' ? '/documents?direction=outbound' : '/documents');
+                // Назад в «Документы» — с их фильтрами, а не с нуля.
+                navigate(
+                  pageUrl('/documents', { direction: k === 'outbound' ? 'outbound' : null }),
+                );
               }}
             />
           </div>

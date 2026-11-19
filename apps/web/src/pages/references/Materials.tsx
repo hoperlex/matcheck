@@ -9,6 +9,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { stringSorter } from '../../shared/ui/tableSorters';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
+import { useUrlPage, useUrlParam } from '../../shared/hooks/useUrlParam';
 
 type List = { items: Material[]; total: number };
 
@@ -16,7 +17,8 @@ export default function MaterialsPage() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Material | null>(null);
-  const [search, setSearch] = useState('');
+  // Поиск — в адресе: переживает переключение вкладок и уход из раздела.
+  const [search, setSearch] = useUrlParam('q');
   const [form] = Form.useForm<MaterialUpsert>();
   // Права страницы. До включения матрицы значения те же, что были у ролей
   // (правит manager, удаляет admin) — так задан дефолт в PAGE_CATALOG.
@@ -32,12 +34,10 @@ export default function MaterialsPage() {
   // и рисовала одну страницу — «есть ли уже такая позиция» проверить было
   // нельзя, поиск точно так же обрывался на 50 совпадениях.
   const PAGE_SIZE = 100;
-  const [page, setPage] = useState(1);
-  // Новый запрос — всегда с первой страницы: иначе после сужения поиска
-  // пользователь остаётся на седьмой странице пустого результата.
-  useEffect(() => {
-    setPage(1);
-  }, [search]);
+  // Страница — в адресе. Новый запрос — всегда с первой страницы: это делает
+  // сам setSearch (useUrlParam). Эффект по search тут нельзя — он сработал бы
+  // и при заходе, стирая восстановленную страницу.
+  const [page, setPage] = useUrlPage();
   const list = useQuery({
     queryKey: ['materials', { search, page, pageSize: PAGE_SIZE }],
     queryFn: () => {

@@ -73,19 +73,21 @@ export function useSyncGlobalFilters({
  * Узкая версия для разделов, где поле «Поставщик» отсутствует (например,
  * История поступлений — фильтры только Объект + Подрядчик). Тут писать
  * supplierIds в стор нельзя — затрём чужой выбор. Поэтому только две
- * пары: подняли site/contractor при init, и далее отзеркаливаем их
- * туда-обратно. Стор-поле supplierIds никем не трогается.
+ * пары: подняли site/contractor при init, и далее отзеркаливаем их в стор.
+ * Стор-поле supplierIds никем не трогается.
+ *
+ * Подхват из стора — ОДНИМ вызовом apply: фильтры страницы живут в адресе, и
+ * два setSearchParams подряд от одного снимка затёрли бы друг друга (объект
+ * пропадал бы, подрядчик оставался).
  */
 export function useSyncGlobalFiltersSiteContractor({
   siteIds,
-  setSiteIds,
   contractorIds,
-  setContractorIds,
+  apply,
 }: {
   siteIds: string[];
-  setSiteIds: (ids: string[]) => void;
   contractorIds: string[];
-  setContractorIds: (ids: string[]) => void;
+  apply: (patch: { siteIds?: string[]; contractorIds?: string[] }) => void;
 }): void {
   const initRef = useRef(false);
   const storeSet = useGlobalFiltersStore((s) => s.set);
@@ -95,8 +97,10 @@ export function useSyncGlobalFiltersSiteContractor({
     initRef.current = true;
     if (siteIds.length > 0 || contractorIds.length > 0) return;
     const s = useGlobalFiltersStore.getState();
-    if (s.siteIds.length > 0) setSiteIds(s.siteIds);
-    if (s.contractorIds.length > 0) setContractorIds(s.contractorIds);
+    const patch: { siteIds?: string[]; contractorIds?: string[] } = {};
+    if (s.siteIds.length > 0) patch.siteIds = s.siteIds;
+    if (s.contractorIds.length > 0) patch.contractorIds = s.contractorIds;
+    if (patch.siteIds || patch.contractorIds) apply(patch);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

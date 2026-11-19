@@ -73,6 +73,19 @@ function MismatchTag({ v }: { v: UpdValidation }) {
   );
 }
 
+/** Ключи адреса, которые снимает «Сбросить» в «Ожидаемых» (сортировка остаётся). */
+const EXPECTED_FILTER_KEYS = [
+  'contractor',
+  'supplier',
+  'site',
+  'q',
+  'kind',
+  'docFrom',
+  'docTo',
+  'expFrom',
+  'expTo',
+] as const;
+
 /**
  * Список ожидаемых УПД (kind=upd, unaccepted=true). Используется и в КПП
  * (direction=inbound — приёмки), и в Отгрузке (direction=outbound).
@@ -168,6 +181,17 @@ export function ExpectedSourceDocsList({
     supplierIds: parseCsvIds(params.get('supplier')),
     siteIds: parseCsvIds(params.get('site')),
     q: params.get('q') ?? '',
+  };
+
+  // «Сбросить»: всё, что читает этот список, кроме сортировки, — одним
+  // изменением адреса. Фильтры «Принятых» (период, признаки) тут не видны и
+  // не трогаются: на своей вкладке они снимаются своей кнопкой.
+  const hasFilters = EXPECTED_FILTER_KEYS.some((key) => params.has(key));
+  const resetFilters = () => {
+    const next = new URLSearchParams(params);
+    for (const key of EXPECTED_FILTER_KEYS) next.delete(key);
+    next.delete('page');
+    setParams(next, { replace: true });
   };
 
   const updateFilters = (patch: Partial<ListFiltersValue>) => {
@@ -362,6 +386,8 @@ export function ExpectedSourceDocsList({
               sitesQuery.isLoading
             }
             searchPlaceholder="Номер документа"
+            onReset={resetFilters}
+            resetDisabled={!hasFilters}
             extra={filtersExtra}
           />
           {tabs && activeTab && onTabChange && (

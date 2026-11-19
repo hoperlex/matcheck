@@ -2,6 +2,7 @@ import { Tabs, Typography } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import type { PageId } from '@matcheck/contracts';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { pageUrl } from '../../shared/listMemory';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 
 const DEFAULT_TAB = '/admin/users';
@@ -37,7 +38,12 @@ export default function AdminLayout() {
           <Typography.Title level={3} style={{ margin: '0 0 8px' }}>
             Администрирование
           </Typography.Title>
-          <Tabs activeKey={active} items={visibleTabs} onChange={(key) => navigate(key)} />
+          <Tabs
+            activeKey={active}
+            items={visibleTabs}
+            // Вкладка открывается со своим поиском (shared/listMemory).
+            onChange={(key) => navigate(pageUrl(key))}
+          />
         </>
       }
     >

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import type { PageId } from '@matcheck/contracts';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
+import { pageUrl } from '../../shared/listMemory';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { api } from '../../services/api';
 
@@ -122,7 +123,13 @@ export default function ReferencesLayout() {
           <Typography.Title level={3} style={{ margin: '0 0 8px' }}>
             Справочники
           </Typography.Title>
-          <Tabs activeKey={active} items={items} onChange={(key) => navigate(key)} />
+          <Tabs
+            activeKey={active}
+            items={items}
+            // Вкладка открывается со своими фильтрами: у «Заказов» и
+            // «Договоров» они в адресе, и голый путь их стирал.
+            onChange={(key) => navigate(pageUrl(key))}
+          />
         </>
       }
     >

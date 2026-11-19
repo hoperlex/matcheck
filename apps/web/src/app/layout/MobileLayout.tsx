@@ -10,6 +10,7 @@ import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
 import { NotificationsBell } from '../../components/NotificationsBell';
 import { useOperationsCounters } from '../../shared/hooks/useOperationsCounters';
+import { sectionUrl } from '../../shared/listMemory';
 
 const { Header, Content, Footer } = Layout;
 
@@ -108,7 +109,8 @@ export function MobileLayout() {
           selectedKeys={[location.pathname]}
           items={allItems}
           onClick={(e) => {
-            navigate(e.key);
+            // Как на десктопе: в раздел — с его вкладкой и фильтрами.
+            navigate(sectionUrl(e.key));
             setOpen(false);
           }}
         />
@@ -154,7 +156,7 @@ export function MobileLayout() {
               key={tab.key}
               type={location.pathname === tab.key ? 'primary' : 'text'}
               size="large"
-              onClick={() => navigate(tab.key)}
+              onClick={() => navigate(sectionUrl(tab.key))}
               style={{ height: 56, borderRadius: 0 }}
             >
               {tab.label}

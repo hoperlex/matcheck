@@ -9,6 +9,7 @@ import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { stringSorter } from '../../shared/ui/tableSorters';
 import { ResponsiblePersonDrawer } from './ResponsiblePersonDrawer';
+import { useUrlParam } from '../../shared/hooks/useUrlParam';
 
 /** Запрос блока ручных МОЛ. */
 export function manualMolUrl(showArchived: boolean): string {
@@ -30,8 +31,10 @@ export function manualMolUrl(showArchived: boolean): string {
  * В списках выбора МОЛ (документы, приёмка, отгрузка) видны активные из обоих.
  */
 export default function MolPersons() {
-  const [search, setSearch] = useState('');
-  const [showArchived, setShowArchived] = useState(false);
+  // Поиск — в адресе: переживает переключение вкладок и уход из раздела.
+  const [search, setSearch] = useUrlParam('q');
+  const [archivedParam, setArchivedParam] = useUrlParam('archived');
+  const showArchived = archivedParam === '1';
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editing, setEditing] = useState<ResponsiblePerson | null>(null);
   // Права ручных МОЛ — ячейки справочника «Ответственные лица»: на них же
@@ -196,7 +199,7 @@ export default function MolPersons() {
           <Switch
             size="small"
             checked={showArchived}
-            onChange={setShowArchived}
+            onChange={(v) => setArchivedParam(v ? '1' : '')}
             aria-label="Показать архивные"
           />
           <Typography.Text>Показать архивные</Typography.Text>

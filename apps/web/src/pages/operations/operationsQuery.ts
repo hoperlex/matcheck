@@ -61,6 +61,43 @@ export function readOperationsFilters(params: URLSearchParams): OperationsFilter
   };
 }
 
+/**
+ * Все ключи адреса, которые читает readOperationsFilters. «Сбросить» снимает
+ * ровно их (и страницу); вкладка, тип и «Удалённые» — не фильтры, остаются.
+ * Новый фильтр в readOperationsFilters обязан попасть и сюда — это проверяет
+ * operationsQuery.test.ts.
+ */
+export const OPERATIONS_FILTER_KEYS = [
+  'contractor',
+  'supplier',
+  'site',
+  'q',
+  'status',
+  'id',
+  'plate',
+  'feature',
+  'purpose',
+  'nophoto',
+  'nophotoHours',
+  'review',
+  'dispatcher',
+  'entry',
+  'dfrom',
+  'dto',
+] as const;
+
+export function hasOperationsFilters(params: URLSearchParams): boolean {
+  return OPERATIONS_FILTER_KEYS.some((key) => params.has(key));
+}
+
+/** Адрес без фильтров «Принятых» и без страницы — для кнопки «Сбросить». */
+export function withoutOperationsFilters(params: URLSearchParams): URLSearchParams {
+  const next = new URLSearchParams(params);
+  for (const key of OPERATIONS_FILTER_KEYS) next.delete(key);
+  next.delete('page');
+  return next;
+}
+
 /** Значение фильтра «Вид» из URL; всё, кроме двух известных, — «все». */
 export function parseEntry(raw: string | null): 'manual' | 'vehicle' | null {
   return raw === 'manual' || raw === 'vehicle' ? raw : null;

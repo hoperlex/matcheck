@@ -11,6 +11,7 @@ import { usePermissions } from '../../shared/hooks/usePermissions';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
+import { useUrlParam } from '../../shared/hooks/useUrlParam';
 
 type List = { items: Unit[]; total: number };
 
@@ -36,7 +37,8 @@ export default function UnitsPage(): JSX.Element {
 
   const [editing, setEditing] = useState<Unit | null>(null);
   const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState('');
+  // Поиск — в адресе: переживает переключение вкладок и уход из раздела.
+  const [search, setSearch] = useUrlParam('q');
   const [form] = Form.useForm<UnitUpsert>();
 
   const list = useQuery({

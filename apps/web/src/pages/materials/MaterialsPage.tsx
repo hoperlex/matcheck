@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Button, Space, Tag, Tooltip, Typography, type TableProps } from 'antd';
 import { PictureOutlined } from '@ant-design/icons';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { MaterialPhotosModal } from './MaterialPhotosModal';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import type {
   CustomerCounterparty,
   MovementRow,
@@ -19,7 +19,18 @@ import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/
 import { antdColumnFilter, externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import { useSyncGlobalFiltersSiteContractor } from '../../shared/hooks/useSyncGlobalFilters';
+import { patchSearchParams, type SearchParamsPatch } from '../../shared/utils/searchParams';
+import { operationCardUrl } from '../../shared/listMemory';
+import { ResetFiltersButton } from '../../shared/ui/ResetFiltersButton';
 import { contractorFilterOptions } from '../shared/contractorFilterOptions';
+import {
+  hasMaterialsFilters,
+  panelPatch,
+  readMaterialsFilters,
+  resetPatch,
+  typesParam,
+  type MovementType,
+} from './materialsFilters';
 
 // Поля серверной сортировки объединённого журнала — ровно enum `sort` в
 // /reports/movements: значение вне списка сервер отклоняет с 400.
@@ -74,16 +85,26 @@ type UnifiedRow = MovementRow;
 
 export default function MaterialsPage() {
   const navigate = useNavigate();
-  const [siteIds, setSiteIds] = useState<string[]>([]);
-  const [contractorIds, setContractorIds] = useState<string[]>([]);
-  const [q, setQ] = useState('');
+  // Все фильтры, страница и сортировка — в адресе (materialsFilters.ts): так
+  // они переживают переход в приёмку и обратно, «Назад» и меню.
+  const [params, setParams] = useSearchParams();
+  const { siteIds, contractorIds, q, types, dateRange, docDateRange, sort, order, page } =
+    readMaterialsFilters(params, asMovementSort);
+  // Единственная точка записи. Один setParams на действие: два вызова от одного
+  // снимка адреса затёрли бы друг друга.
+  const updateParams = (patch: SearchParamsPatch) => {
+    setParams(patchSearchParams(params, patch), { replace: true });
+  };
+  const updateFilters = (patch: Parameters<typeof panelPatch>[0]) => {
+    updateParams(panelPatch(patch));
+  };
   // Состояние модалки «Фото материала». Открывается из иконки 📷 в
   // колонке «Тип» — не путать с onRowClick (тот ведёт в edit-режим).
   const [photosFor, setPhotosFor] = useState<{
     kind: 'delivery' | 'shipment';
     id: string;
   } | null>(null);
-  useSyncGlobalFiltersSiteContractor({ siteIds, setSiteIds, contractorIds, setContractorIds });
+  useSyncGlobalFiltersSiteContractor({ siteIds, contractorIds, apply: updateFilters });
 
   // Ключи кэша включают параметры запроса: под общим ['sites','all'] лежали
   // ответы с разными limit/activeOnly, и какой из них выиграет, зависело от
@@ -107,19 +128,6 @@ export default function MaterialsPage() {
   // Страница, сортировка и колоночные фильтры — состояние таблицы; всё это
   // применяет сервер, поэтому клиентских sorter'ов и onFilter здесь нет.
   const PAGE_SIZE = 100;
-  const [page, setPage] = useState(1);
-  const [sort, setSort] = useState<MovementSort | null>(null);
-  const [order, setOrder] = useState<'asc' | 'desc'>('desc');
-  // По умолчанию открыт только «Поступление» — раздел так и называется.
-  const [types, setTypes] = useState<Array<'intake' | 'shipment'>>(['intake']);
-  const [dateRange, setDateRange] = useState<{ from: string | null; to: string | null }>({
-    from: null,
-    to: null,
-  });
-  const [docDateRange, setDocDateRange] = useState<{ from: string | null; to: string | null }>({
-    from: null,
-    to: null,
-  });
 
   const movementsQuery = useQuery({
     queryKey: [
@@ -154,7 +162,7 @@ export default function MaterialsPage() {
   const rows = movementsQuery.data?.items ?? [];
 
   // Варианты воронок «Объект» и «Подрядчик» — те же, что у полей панели. Воронка
-  // меняет то же состояние (setSiteIds / setContractorIds), поэтому поле панели
+  // меняет тот же параметр адреса (updateFilters), поэтому поле панели
   // и воронка всегда показывают одно и то же.
   const siteOptions = useMemo(
     () => (sites.data?.items ?? []).map((s) => ({ value: s.id, label: `${s.code} · ${s.name}` })),
@@ -186,9 +194,7 @@ export default function MaterialsPage() {
     // Белый список: ключ, которого нет в enum сервера, превратился бы в 400.
     const nextSort = single?.order ? asMovementSort(single.columnKey ?? single.field) : null;
     const nextOrder: 'asc' | 'desc' = single?.order === 'ascend' ? 'asc' : 'desc';
-    const nextTypes = ((tableFilters['type'] as Array<'intake' | 'shipment'> | null) ?? []).filter(
-      Boolean,
-    );
+    const nextTypes = ((tableFilters['type'] as MovementType[] | null) ?? []).filter(Boolean);
     const nextDate = parseDateRangeKey(tableFilters['date']?.[0] as string | undefined);
     const nextDocDate = parseDateRangeKey(tableFilters['docDate']?.[0] as string | undefined);
     const changed =
@@ -199,19 +205,22 @@ export default function MaterialsPage() {
       nextDate.to !== dateRange.to ||
       nextDocDate.from !== docDateRange.from ||
       nextDocDate.to !== docDateRange.to;
-    setSort(nextSort);
-    setOrder(nextOrder);
-    setTypes(nextTypes);
-    setDateRange(nextDate);
-    setDocDateRange(nextDocDate);
     // Смена состава выдачи возвращает на первую страницу.
-    setPage(changed ? 1 : (tablePagination.current ?? 1));
+    const nextPage = changed ? 1 : (tablePagination.current ?? 1);
+    updateParams({
+      sort: nextSort,
+      order: nextSort ? nextOrder : null,
+      type: typesParam(nextTypes),
+      dfrom: nextDate.from,
+      dto: nextDate.to,
+      docFrom: nextDocDate.from,
+      docTo: nextDocDate.to,
+      page: nextPage > 1 ? String(nextPage) : null,
+    });
   };
-
-  // Смена фильтров панели — тоже с первой страницы.
-  useEffect(() => {
-    setPage(1);
-  }, [siteIds, contractorIds, q]);
+  // Смена фильтров панели — с первой страницы: это делает panelPatch. Эффект
+  // «сбросить страницу при смене фильтров» здесь нельзя: он срабатывал бы и
+  // при заходе на страницу, стирая восстановленный номер страницы.
 
   return (
     <StickyPageHeader
@@ -232,7 +241,7 @@ export default function MaterialsPage() {
               width={240}
               placeholder="Все объекты"
               value={siteIds}
-              onChange={setSiteIds}
+              onChange={(ids) => updateFilters({ siteIds: ids })}
               loading={sites.isLoading}
               options={(sites.data?.items ?? []).map((s) => ({
                 value: s.id,
@@ -244,7 +253,7 @@ export default function MaterialsPage() {
               width={240}
               placeholder="Подрядчик"
               value={contractorIds}
-              onChange={setContractorIds}
+              onChange={(ids) => updateFilters({ contractorIds: ids })}
               loading={customerCounterparties.isLoading}
               options={contractorOptions}
               popupWidth={360}
@@ -252,8 +261,12 @@ export default function MaterialsPage() {
             <DebouncedSearch
               placeholder="Материал или контрагент"
               value={q}
-              onChange={setQ}
+              onChange={(v) => updateFilters({ q: v })}
               style={{ width: 320 }}
+            />
+            <ResetFiltersButton
+              disabled={!hasMaterialsFilters(params)}
+              onReset={() => updateParams(resetPatch())}
             />
           </Space>
         }
@@ -284,11 +297,12 @@ export default function MaterialsPage() {
           onRowClick={(r) => {
             // from=materials — флажок «после закрытия модалки вернуть
             // пользователя в Историю поступлений, а не оставить в Операциях».
-            // Обрабатывается в OperationsPage.closeModal.
+            // Обрабатывается в OperationsPage.closeModal и savedOperationListUrl;
+            // фильтры Истории возвращает память списков (shared/listMemory).
             if (r.type === 'intake' && r.deliveryId) {
-              navigate(`/operations?type=delivery&delivery=${r.deliveryId}&from=materials`);
+              navigate(operationCardUrl('delivery', r.deliveryId, 'materials'));
             } else if (r.type === 'shipment' && r.shipmentId) {
-              navigate(`/operations?type=shipment&shipment=${r.shipmentId}&from=materials`);
+              navigate(operationCardUrl('shipment', r.shipmentId, 'materials'));
             }
           }}
           columns={[
@@ -354,7 +368,7 @@ export default function MaterialsPage() {
                 options: siteOptions,
                 loading: sites.isLoading,
                 value: siteIds,
-                onApply: setSiteIds,
+                onApply: (ids) => updateFilters({ siteIds: ids }),
               }),
               render: (_: unknown, r: UnifiedRow) => `${r.siteCode} · ${r.siteName}`,
             },
@@ -392,7 +406,7 @@ export default function MaterialsPage() {
                 options: contractorOptions,
                 loading: customerCounterparties.isLoading,
                 value: contractorIds,
-                onApply: setContractorIds,
+                onApply: (ids) => updateFilters({ contractorIds: ids }),
               }),
               render: (v: string | null) => v ?? '—',
             },

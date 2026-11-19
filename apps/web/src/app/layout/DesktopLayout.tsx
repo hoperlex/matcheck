@@ -9,6 +9,7 @@ import { api } from '../../services/api';
 import { UserProfileModal } from '../../components/UserProfileModal';
 import { NotificationsBell } from '../../components/NotificationsBell';
 import { useOperationsCounters } from '../../shared/hooks/useOperationsCounters';
+import { sectionUrl } from '../../shared/listMemory';
 
 const { Sider, Content } = Layout;
 
@@ -145,7 +146,11 @@ export function DesktopLayout() {
             mode="inline"
             selectedKeys={selected ? [selected.key] : []}
             items={items}
-            onClick={(e) => navigate(e.key)}
+            // Пункт меню ведёт туда, где человек оставил раздел, — с его
+            // вкладкой и фильтрами (shared/listMemory). Голый путь сбрасывал
+            // всё, а повторный клик по текущему разделу стирал ещё и общие
+            // объект/подрядчика/поставщика.
+            onClick={(e) => navigate(sectionUrl(e.key))}
             style={{ flex: 1, borderInlineEnd: 'none' }}
           />
           <div

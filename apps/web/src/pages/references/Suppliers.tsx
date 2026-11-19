@@ -23,6 +23,7 @@ import { stringSorter } from '../../shared/ui/tableSorters';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
+import { useUrlParam } from '../../shared/hooks/useUrlParam';
 
 type List = { items: Supplier[]; total: number };
 
@@ -38,7 +39,8 @@ export default function SuppliersPage() {
   const [open, setOpen] = useState(false);
   // null — режим создания, иначе редактируется конкретная запись.
   const [editing, setEditing] = useState<Supplier | null>(null);
-  const [search, setSearch] = useState('');
+  // Поиск — в адресе: переживает переключение вкладок и уход из раздела.
+  const [search, setSearch] = useUrlParam('q');
   const [form] = Form.useForm<SupplierUpsert>();
 
   // Справочник цельный (~1000 строк) — тянем весь, фильтр/сортировка на клиенте
