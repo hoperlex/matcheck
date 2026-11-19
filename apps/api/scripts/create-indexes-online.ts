@@ -9,13 +9,23 @@
  * CONCURRENTLY (лок SHARE UPDATE EXCLUSIVE — запись НЕ блокируется).
  *
  * Порядок: сначала прогнать ЭТОТ скрипт на проде, затем обычный деплой —
- * миграция 0071 (CREATE INDEX IF NOT EXISTS) увидит готовые индексы и станет
- * мгновенным no-op. Список индексов ЗЕРКАЛИТ 0071_perf_indexes.sql (имена и
+ * миграции (CREATE INDEX IF NOT EXISTS) увидят готовые индексы и станут
+ * мгновенным no-op. Список индексов ЗЕРКАЛИТ 0071_perf_indexes.sql,
+ * 0093_refresh_session_idx.sql и 0154_bundle_root_and_s3_key_idx.sql (имена и
  * определения обязаны совпадать — миграция сверяет по имени через IF NOT EXISTS).
+ *
+ * Запуск на hub из УЖЕ РАБОТАЮЩЕГО образа, без сборки и пересоздания
+ * контейнеров: свежая версия этого файла подкладывается поверх образной.
+ *   docker compose -f infra/docker-compose.prod.yml run --rm --no-deps \
+ *     -v "$PWD/apps/api/scripts/create-indexes-online.ts:/app/apps/api/scripts/create-indexes-online.ts:ro" \
+ *     matcheck-api node_modules/.bin/tsx scripts/create-indexes-online.ts
+ * Скрипт самодостаточен (только пакет postgres), поэтому код образа ему не важен.
+ * Ненулевой код выхода = СТОП: деплой не запускать, перезапустить скрипт.
  *
  * Гарантии: только CONCURRENTLY; после каждого — проверка indisvalid/indisready
  * и pg_get_indexdef; invalid-индекс (после сбоя CONCURRENTLY) дропается и
- * пересоздаётся; в конце — целевой ANALYZE. Идемпотентно (IF NOT EXISTS).
+ * пересоздаётся при следующем запуске; в конце каждого успешного прогона —
+ * ANALYZE всех таблиц списка. Идемпотентно (IF NOT EXISTS).
  */
 import postgres from 'postgres';
 
@@ -26,8 +36,9 @@ interface IndexSpec {
   columns: string;
 }
 
-// Зеркало 0071_perf_indexes.sql и 0093_refresh_session_idx.sql.
-// При правке — синхронизировать соответствующий файл миграции.
+// Зеркало 0071_perf_indexes.sql, 0093_refresh_session_idx.sql и
+// 0154_bundle_root_and_s3_key_idx.sql. При правке — синхронизировать
+// соответствующий файл миграции.
 const INDEXES: IndexSpec[] = [
   { name: 'delivery_items_delivery_line_idx', table: 'delivery_items', columns: '("delivery_id", "line_no")' },
   { name: 'shipment_items_shipment_line_idx', table: 'shipment_items', columns: '("shipment_id", "line_no")' },
@@ -60,6 +71,22 @@ const INDEXES: IndexSpec[] = [
     table: 'refresh_tokens',
     columns: '("session_id") WHERE "revoked_at" IS NULL',
   },
+  // 0154: «машина» — корневой пакет загрузки. Предикат видимости планшета,
+  // счётчик документов машины и бампы ревизии соединяют пакеты условием
+  // coalesce(parent_bundle_id, id) = root.id; без индекса на это выражение
+  // каждая проверка перебирала таблицу пакетов целиком (сверка АЛИЯ — 34 с).
+  // Выражение обязано БУКВАЛЬНО совпадать с запросами, иначе индекс не возьмут.
+  {
+    name: 'source_bundles_root_idx',
+    table: 'source_bundles',
+    columns: '((coalesce("parent_bundle_id", "id")))',
+  },
+  // 0154: «есть ли документ у принятого файла» — поиск вложения по ключу S3.
+  {
+    name: 'source_document_attachments_s3_key_idx',
+    table: 'source_document_attachments',
+    columns: '("s3_key")',
+  },
 ];
 
 async function verify(
@@ -89,11 +116,19 @@ async function main() {
   const sql = postgres(url, { max: 1, prepare: false });
 
   try {
-    // Ограничиваем ожидание конфликтующих локов: CONCURRENTLY ждёт завершения
-    // текущих транзакций; при затыке не висим бесконечно, а падаем с ошибкой.
-    await sql.unsafe(`SET lock_timeout = '10s'`);
-
-    const affectedTables = new Set<string>();
+    // Ограничиваем ожидание конфликтующих локов: при затыке не висим бесконечно,
+    // а падаем с ошибкой.
+    //
+    // Пять минут, а не секунды. CONCURRENTLY в конце ждёт, пока завершатся ВСЕ
+    // запросы, начатые раньше него, и это ожидание тоже идёт через блокировку,
+    // то есть под lock_timeout. Сверка планшета до появления индексов 0154
+    // длится до 35 с, и планшеты запускают её постоянно: с прежними 10 с
+    // построение падало бы почти наверняка, оставляя INVALID-индекс.
+    //
+    // Долгое ожидание здесь безопасно: CONCURRENTLY держит SHARE UPDATE
+    // EXCLUSIVE, а с ним конфликтуют только DDL и VACUUM/ANALYZE той же таблицы.
+    // Чтение и запись планшетов и портала идут как обычно.
+    await sql.unsafe(`SET lock_timeout = '5min'`);
 
     for (const idx of INDEXES) {
       const before = await verify(sql, idx.name);
@@ -123,12 +158,18 @@ async function main() {
         process.exit(1);
       }
       console.info(`[create-indexes] ${idx.name} OK — ${after.def}`);
-      affectedTables.add(idx.table);
     }
 
-    // Целевой ANALYZE по затронутым таблицам — чтобы планировщик сразу увидел
-    // новые индексы (без ожидания autovacuum).
-    for (const table of affectedTables) {
+    // ANALYZE по ВСЕМ таблицам списка, а не только по тем, где индекс построен в
+    // этом прогоне. Иначе дыра: первый прогон построил индекс и упал на
+    // следующем, до ANALYZE не дойдя; повторный прогон этот индекс пропускает
+    // как готовый — и его таблица осталась бы без свежей статистики. Для индекса
+    // по ВЫРАЖЕНИЮ это существенно: статистику выражения собирает только
+    // ANALYZE, и без неё планировщик может не выбрать быстрый план.
+    //
+    // ANALYZE не блокирует ни чтение, ни запись; таблицы небольшие — секунды.
+    const tablesToAnalyze = [...new Set(INDEXES.map((idx) => idx.table))];
+    for (const table of tablesToAnalyze) {
       console.info(`[create-indexes] ANALYZE ${table}`);
       await sql.unsafe(`ANALYZE "${table}"`);
     }
@@ -141,5 +182,14 @@ async function main() {
 
 main().catch((err) => {
   console.error('[create-indexes] failed', err);
+  // Сбой посреди CREATE INDEX CONCURRENTLY оставляет индекс с тем же именем в
+  // состоянии INVALID: имя занято, а планировщик его не использует. Повторный
+  // запуск это чинит — такой индекс удаляется и строится заново (см. цикл выше).
+  // Деплой до успешного прогона не запускать: миграция со стражем валидности
+  // всё равно остановится на нём.
+  console.error(
+    '[create-indexes] СТОП: индекс мог остаться INVALID. Перезапустите этот скрипт — ' +
+      'он удалит и построит индекс заново. Деплой до успешного прогона не запускать.',
+  );
   process.exit(1);
 });

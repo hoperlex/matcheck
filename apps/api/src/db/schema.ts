@@ -1390,6 +1390,12 @@ export const sourceBundles = pgTable(
     index('source_bundles_parent_idx')
       .on(t.parentBundleId)
       .where(sql`${t.parentBundleId} is not null`),
+    // «Машина» — корневой пакет (миграция 0154). Предикат видимости планшета,
+    // счётчик документов машины и бампы ревизии соединяют пакеты условием
+    // coalesce(parent_bundle_id, id) = root.id; parent_idx выше его не
+    // обслуживает (только parent_bundle_id и только не-NULL). Выражение обязано
+    // буквально совпадать с запросами, иначе планировщик индекс не возьмёт.
+    index('source_bundles_root_idx').on(sql`coalesce(${t.parentBundleId}, ${t.id})`),
   ],
 );
 
@@ -1613,18 +1619,32 @@ export const sourceDocumentItems = pgTable('source_document_items', {
   inventoryNumber: text('inventory_number'),
 });
 
-export const sourceDocumentAttachments = pgTable('source_document_attachments', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  sourceDocumentId: uuid('source_document_id')
-    .notNull()
-    .references(() => sourceDocuments.id, { onDelete: 'cascade' }),
-  s3Key: text('s3_key').notNull(),
-  filename: text('filename').notNull(),
-  mimeType: varchar('mime_type', { length: 128 }),
-  sizeBytes: integer('size_bytes'),
-  role: attachmentRoleEnum('role').notNull().default('original'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const sourceDocumentAttachments = pgTable(
+  'source_document_attachments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    sourceDocumentId: uuid('source_document_id')
+      .notNull()
+      .references(() => sourceDocuments.id, { onDelete: 'cascade' }),
+    s3Key: text('s3_key').notNull(),
+    filename: text('filename').notNull(),
+    mimeType: varchar('mime_type', { length: 128 }),
+    sizeBytes: integer('size_bytes'),
+    role: attachmentRoleEnum('role').notNull().default('original'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Вложения документа (миграция 0071).
+    index('source_document_attachments_source_document_idx').on(
+      t.sourceDocumentId,
+      t.role,
+      t.createdAt,
+    ),
+    // «Есть ли документ у принятого файла» — поиск по ключу S3 (миграция 0154):
+    // предикат видимости планшета, заглушки, список документов портала.
+    index('source_document_attachments_s3_key_idx').on(t.s3Key),
+  ],
+);
 
 // ─── LLM calls log ─────────────────────────────────────────────────────────
 // Журнал общения с LLM при распознавании документов: хранит сырой запрос и
