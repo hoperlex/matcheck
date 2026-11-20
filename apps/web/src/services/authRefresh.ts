@@ -21,6 +21,7 @@
 // клиент — Safari, где AbortSignal.any только с 17.4.
 
 import * as Sentry from '@sentry/react';
+import { CAPABILITIES_HEADER, PORTAL_CAPABILITIES } from './clientCapabilities';
 
 const REFRESH_URL = '/api/v1/auth/refresh';
 const LOCK_NAME = 'matcheck-auth-refresh';
@@ -55,7 +56,12 @@ let inFlight: Promise<RefreshResult> | null = null;
 async function doNetworkRefresh(signal: AbortSignal): Promise<RefreshResult> {
   let res: Response;
   try {
-    res = await fetch(REFRESH_URL, { method: 'POST', credentials: 'include', signal });
+    res = await fetch(REFRESH_URL, {
+      method: 'POST',
+      credentials: 'include',
+      signal,
+      headers: { [CAPABILITIES_HEADER]: PORTAL_CAPABILITIES },
+    });
   } catch (err) {
     // Abort (таймаут) отличаем от прочих сетевых сбоев — оба транзиентны.
     const aborted = err instanceof DOMException && err.name === 'AbortError';

@@ -739,6 +739,11 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
   ['PATCH /api/v1/source-documents/:id/direction', st('documents.list', 'edit')],
   ['POST /api/v1/source-documents/:id/acknowledge-mismatch', st('documents.list', 'edit')],
   ['POST /api/v1/source-documents/:id/resolve-duplicate', st('documents.list', 'edit')],
+  // Объединение машин — как разрешение дубликата: правка состава поставки.
+  ['GET /api/v1/source-documents/machine-merge/config', st('documents.list', 'edit')],
+  ['POST /api/v1/source-documents/machine-merge/preview', st('documents.list', 'edit')],
+  ['POST /api/v1/source-documents/machine-merge', st('documents.list', 'edit')],
+  ['POST /api/v1/source-documents/machine-unmerge', st('documents.list', 'edit')],
   // Окно разрешения дубликата — та же ячейка, что и само действие: кому нельзя
   // разрешать, тому и окно не нужно. Мониторинг получает обе галочкой
   // «Документы × Редактировать» (расширение снимает allow-list admin/manager).

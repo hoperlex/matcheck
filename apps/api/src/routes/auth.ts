@@ -34,6 +34,32 @@ import { loadEnv } from '../lib/env.js';
 import { createBurstyRateLimit } from '../lib/auth-rate-limit.js';
 import { isWebOnlyRole } from '../lib/roles.js';
 import { siteIdsOfUser } from '../domain/auth/user-sites.js';
+import {
+  CAPABILITIES_HEADER,
+  clientSupportsGroupClaim,
+  groupClaimEnabledForSite,
+} from '../domain/groups/claim-scope.js';
+import { parseCapabilities } from '../domain/groups/group-mode.js';
+
+function capabilitiesHeaderOf(
+  headers: Record<string, string | string[] | undefined>,
+): string | undefined {
+  const raw = headers[CAPABILITIES_HEADER];
+  return Array.isArray(raw) ? raw.join(',') : raw;
+}
+
+/** Инспектор защищённого объекта с клиентом, не понимающим протокол занятия. */
+function outdatedOnProtectedSite(
+  role: string,
+  siteId: string | null,
+  capabilityHeader: string | undefined,
+): boolean {
+  return (
+    role === 'inspector_kpp' &&
+    groupClaimEnabledForSite(siteId) &&
+    !clientSupportsGroupClaim(parseCapabilities(capabilityHeader))
+  );
+}
 
 const env = loadEnv();
 
@@ -207,6 +233,8 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
           200: LoginResponseSchema,
           401: ErrorResponseSchema,
           403: ErrorResponseSchema,
+          // Старая сборка инспектора на объекте с протоколом занятия машины.
+          426: ErrorResponseSchema,
         },
       },
     },
@@ -270,10 +298,24 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       // По частичному индексу обычно задевает ноль строк.
       await closeOpenResetRequest(app.db, user.id);
 
+      // Инспектор объекта с протоколом «одна машина — одна приёмка» входит
+      // только с клиентом, который его понимает: старая сборка не разберёт
+      // typed-отказы. Данные на планшете при этом не теряются (стираются они
+      // только при смене аккаунта), а чип обновления в приложении доступен.
+      // Гарантию держит проверка при записи приёмки — здесь понятный сигнал.
+      const capabilityHeader = capabilitiesHeaderOf(req.headers);
+      if (outdatedOnProtectedSite(user.role, user.siteId, capabilityHeader)) {
+        return reply.code(426).send({
+          error: 'client_outdated',
+          message: 'Обновите приложение: на этом объекте работает защита от повторного оформления машины',
+        });
+      }
+
       const refresh = await createSessionAndRefresh(
         user.id,
         req.ip,
         req.headers['user-agent'] ?? undefined,
+        capabilityHeader,
       );
       const access = await signAccessToken({
         sub: user.id,
@@ -324,10 +366,12 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       if (!presented) {
         return reply.code(401).send({ error: 'no_refresh' });
       }
+      const capabilityHeader = capabilitiesHeaderOf(req.headers);
       const result = await rotateRefreshToken(
         presented,
         req.ip,
         req.headers['user-agent'] ?? undefined,
+        capabilityHeader,
       );
       if (!result) {
         if (!mobile) {
@@ -348,11 +392,16 @@ export async function authRoutes(rawApp: FastifyInstance): Promise<void> {
       }
 
       const [user] = await app.db
-        .select({ role: users.role })
+        .select({ role: users.role, siteId: users.siteId })
         .from(users)
         .where(eq(users.id, result.userId))
         .limit(1);
       if (!user) return reply.code(401).send({ error: 'invalid_refresh' });
+      // Старая сборка на защищённом объекте: 401 — приложение выйдет из сессии
+      // (данные на планшете остаются) и при входе получит 426 «обновите».
+      if (outdatedOnProtectedSite(user.role, user.siteId, capabilityHeader)) {
+        return reply.code(401).send({ error: 'invalid_refresh' });
+      }
 
       const access = await signAccessToken({
         sub: result.userId,

@@ -10,6 +10,7 @@ import {
   Tooltip,
   Typography,
   message,
+  notification,
   type TableProps,
 } from 'antd';
 import {
@@ -18,6 +19,7 @@ import {
   ExclamationCircleOutlined,
   LoadingOutlined,
   MailOutlined,
+  MergeCellsOutlined,
   CloudUploadOutlined,
   MinusSquareOutlined,
   PlusSquareOutlined,
@@ -26,12 +28,23 @@ import {
   WarningOutlined,
 } from '@ant-design/icons';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { MachineMergeResponse, SourceDocument } from '@matcheck/contracts';
+import { clusterRowsByGroup } from '../../shared/ui/documentGroupRows';
+import { isGroupHead, useCollapsedGroups, withGroupRows } from '../../shared/ui/groupRows';
+import { GroupBracketStyle, GroupToggle, gutterCellClass } from '../../shared/ui/GroupGutter';
 import {
-  clusterRowsByGroup,
-  documentGroupKey,
-  GROUP_COLORS,
-  groupRowClass,
-} from '../../shared/ui/documentGroupRows';
+  buildMachineRows,
+  documentsCount,
+  MACHINE_GROUPS_COLLAPSED_KEY,
+  type MachineHeadRow,
+} from './machineGroupRows';
+import { MachineGroupHeader } from './MachineGroupHeader';
+import { MachineMergeModal } from './MachineMergeModal';
+import {
+  mergeEnabledFor,
+  useMachineMergeConfig,
+  useMachineUnmergeMutation,
+} from './useMachineMerge';
 import { isPendingRow, pendingAsRow, pendingStateOf } from './pendingRow';
 import { buildDocumentListParams, type DocumentListParamsInput } from './listParams';
 import type {
@@ -82,6 +95,8 @@ import { pageUrl } from '../../shared/listMemory';
 
 type List = z.infer<typeof SourceDocumentListResponseSchema>;
 type Row = List['items'][number];
+/** Строка таблицы: документ (или принятый файл) либо строка поставки над ними. */
+type TableRow = Row | MachineHeadRow;
 
 const UNFINISHED_STATUSES: ReadonlyArray<Row['status']> = [
   'queued',
@@ -874,6 +889,15 @@ export default function InboxPage() {
     () => clusterRowsByGroup([...pendingRows, ...filteredItems]),
     [pendingRows, filteredItems],
   );
+  // Поставки скобкой «−/+», как группы приёмок в «Принятых»: строка поставки
+  // над её документами. Скобка — у поставок из двух и более строк.
+  const { collapsed: collapsedMachines, toggle: toggleMachine } = useCollapsedGroups(
+    MACHINE_GROUPS_COLLAPSED_KEY,
+  );
+  const machineRows = useMemo(
+    () => buildMachineRows(groupedItems, collapsedMachines),
+    [groupedItems, collapsedMachines],
+  );
 
   // Префетч позиций — фоном после рендера списка. Клик «+» раскрывает
   // строку, дёргать сеть в этот момент не приходится: ExpandedSource-
@@ -889,7 +913,83 @@ export default function InboxPage() {
   const toggleExpand = (id: string) =>
     setExpandedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const bulk = useBulkSelection<Row>((r) => r.id);
+  const bulk = useBulkSelection<TableRow>((r) => r.id);
+  // Свернуть поставку — значит и снять отметки со скрытых документов:
+  // невидимое не должно уйти в массовое действие.
+  const toggleMachineGroup = (head: MachineHeadRow) => {
+    if (!head.collapsed) head.visibleIds.forEach((id) => bulk.remove(id));
+    toggleMachine(head.key);
+  };
+
+  // ─── объединение машин ─────────────────────────────────────────────
+  const mergeConfig = useMachineMergeConfig(canEditDocs && !isContractor);
+  const mergeAvailable = canEditDocs && mergeEnabledFor(mergeConfig.data);
+  const [mergeIds, setMergeIds] = useState<string[] | null>(null);
+  const unmerge = useMachineUnmergeMutation();
+  const unmergeDone = (res: { changed: boolean; documentIds: string[] }) =>
+    void message.success(
+      res.changed
+        ? `Машина разъединена: ${documentsCount(res.documentIds.length)}`
+        : 'Машина уже разъединена',
+    );
+  const unmergeFailed = (err: unknown) => {
+    if (err instanceof ApiError && err.code === 'composition_changed') {
+      void message.warning('Состав машины изменился — обновите список и проверьте ещё раз');
+      return;
+    }
+    void message.error(err instanceof Error ? err.message : 'Не удалось разъединить');
+  };
+  // «Отменить» сразу после слияния — отмена именно этой операции: сервер
+  // откажет, если после неё в машину кто-то добавил документы.
+  const undoMerge = (res: MachineMergeResponse) =>
+    unmerge.mutate(
+      {
+        documentId: res.documentIds[0]!,
+        expectedDocumentIds: res.documentIds,
+        mergeId: res.mergeId!,
+      },
+      { onSuccess: unmergeDone, onError: unmergeFailed },
+    );
+  const onMerged = (res: MachineMergeResponse) => {
+    setMergeIds(null);
+    bulk.clear();
+    const key = `machine-merge-${res.groupId}`;
+    notification.success({
+      key,
+      message: res.changed
+        ? `Объединено в одну машину: ${documentsCount(res.documentIds.length)}`
+        : 'Документы уже в одной машине',
+      actions:
+        res.changed && res.undoable && res.mergeId ? (
+          <Button
+            size="small"
+            onClick={() => {
+              notification.destroy(key);
+              undoMerge(res);
+            }}
+          >
+            Отменить
+          </Button>
+        ) : undefined,
+      duration: 10,
+    });
+  };
+  // «Разъединить» в строке поставки: полный состав берём из карточки — на
+  // странице его часть может быть скрыта фильтром.
+  const unmergeHead = async (head: MachineHeadRow) => {
+    const first = head.group.members.find((r) => !isPendingRow(r));
+    if (!first) return;
+    try {
+      const detail = await api.get<SourceDocument>(`/source-documents/${first.id}`);
+      const res = await unmerge.mutateAsync({
+        documentId: first.id,
+        expectedDocumentIds: detail.machineDocumentIds ?? [],
+      });
+      unmergeDone(res);
+    } catch (err) {
+      unmergeFailed(err);
+    }
+  };
   const bulkDel = useMutation({
     mutationFn: (ids: string[]) =>
       api.post<SourceDocumentBulkDeleteResponse>('/source-documents/bulk-delete', { ids }),
@@ -1102,6 +1202,19 @@ export default function InboxPage() {
   // принятых файлов над таблицей.
   // Карточка строки для мобильного вида — общая у списка и у блока
   // принятых файлов над ним.
+  // Строка поставки: текст сводки и «Разъединить» у объединённой машины.
+  const renderMachineHead = (head: MachineHeadRow, wrap = false) => {
+    const siteId = head.group.members.find((r) => !isPendingRow(r))?.siteId ?? null;
+    return (
+      <MachineGroupHeader
+        head={head}
+        canUnmerge={canEditDocs && mergeEnabledFor(mergeConfig.data, siteId)}
+        onUnmerge={() => void unmergeHead(head)}
+        unmerging={unmerge.isPending}
+        wrap={wrap}
+      />
+    );
+  };
   const documentCardRender = (r: Row) => (
     <Card style={{ width: '100%' }} size="small">
       <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
@@ -1411,6 +1524,14 @@ export default function InboxPage() {
                   <Typography.Text type="secondary">
                     Выбрано: <b>{bulk.selectedCount}</b>
                   </Typography.Text>
+                  {mergeAvailable && bulk.selectedCount >= 2 && (
+                    <Button
+                      icon={<MergeCellsOutlined />}
+                      onClick={() => setMergeIds([...bulk.selectedIds])}
+                    >
+                      Объединить в одну машину
+                    </Button>
+                  )}
                   <Popconfirm
                     title={`Удалить ${bulk.selectedCount} ${pluralizeDoc(bulk.selectedCount)}?`}
                     okText="Удалить"
@@ -1489,19 +1610,10 @@ export default function InboxPage() {
           </>
         }
       >
-        {/* Метка машины: документы одной загрузки помечены общей полосой слева.
-          Правила строятся из GROUP_COLORS — списка, по которому считается и
-          индекс цвета, поэтому палитра и классы не могут разойтись.
-          box-shadow вместо border-left: border сдвигал бы содержимое ячейки и
-          ломал выравнивание колонки «№» между строками. */}
-        <style>
-          {GROUP_COLORS.map(
-            (color, i) =>
-              `.matcheck-doc-group-${i} > td:first-child { box-shadow: inset 4px 0 0 ${color}; }`,
-          ).join('\n')}
-        </style>
-        <ResponsiveTable<Row>
-          items={groupedItems}
+        {/* Поставка — скобкой «−/+» слева, как группы приёмок в «Принятых». */}
+        <GroupBracketStyle />
+        <ResponsiveTable<TableRow>
+          items={machineRows.rows}
           loading={list.isLoading}
           rowKey="id"
           numbered
@@ -1541,8 +1653,33 @@ export default function InboxPage() {
                 )) * PAGE_SIZE,
             showSizeChanger: false,
             showTotal: () => `Всего: ${(list.data?.total ?? 0) + (list.data?.pendingTotal ?? 0)}`,
+            // Переключатель страниц — отдельно от таблицы (externalPagination):
+            // строки поставок добавляются к документам страницы, и antd резал
+            // бы массив сам. Смену страницы таблица больше не сообщает.
+            onChange: (next: number) => {
+              bulk.clear();
+              updateParams({ page: next <= 1 ? null : String(next) });
+            },
           }}
-          onChange={handleTableChange}
+          externalPagination
+          leadingColumn={{
+            key: '__machine__',
+            width: 28,
+            onCell: (r: TableRow) => ({
+              className: gutterCellClass(
+                machineRows.gutter.get(r.id) ?? null,
+                isGroupHead(r) && (r as MachineHeadRow).collapsed,
+              ),
+            }),
+            render: (_: unknown, r: TableRow) =>
+              isGroupHead(r) ? (
+                <GroupToggle
+                  collapsed={(r as MachineHeadRow).collapsed}
+                  onToggle={() => toggleMachineGroup(r as MachineHeadRow)}
+                />
+              ) : null,
+          }}
+          onChange={handleTableChange as unknown as TableProps<TableRow>['onChange']}
           numberedOffset={(page - 1) * PAGE_SIZE}
           rowSelection={
             isContractor
@@ -1551,27 +1688,53 @@ export default function InboxPage() {
                   ...bulk.selection,
                   // Массовое удаление относится к документам. У принятого файла
                   // документа ещё нет — удалять нечего, чекбокс неактивен.
-                  getCheckboxProps: (r: Row) => ({ disabled: isPendingRow(r) }),
+                  // Строку поставки выбрать нельзя: её ячейку выбора закрывает
+                  // растянутая первая колонка.
+                  getCheckboxProps: (r: TableRow) => ({
+                    disabled: isGroupHead(r) || isPendingRow(r),
+                  }),
+                  onCell: (r: TableRow) => (isGroupHead(r) ? { colSpan: 0 } : {}),
                 }
           }
-          // Цветная полоса слева у документов одной машины. Приглушённая:
-          // строку со статусом «не распознано» она перекрикивать не должна.
-          rowClassName={(r) => groupRowClass(documentGroupKey(r))}
+          rowClassName={(r) => (isGroupHead(r) ? 'mc-group-head' : '')}
           expandable={{
             // Свою колонку с иконкой не рендерим — ± живёт в столбце «Тип».
             showExpandColumn: false,
             expandedRowKeys: expandedIds,
-            expandedRowRender: (r) => (
-              <ExpandedSourceDocumentItems id={r.id} kind={r.kind} withVat />
-            ),
+            rowExpandable: (r) => !isGroupHead(r),
+            expandedRowRender: (r) =>
+              isGroupHead(r) ? null : (
+                <ExpandedSourceDocumentItems id={r.id} kind={(r as Row).kind} withVat />
+              ),
           }}
-          // Карточки у принятого файла не существует — открывать нечего.
+          // Клик по строке поставки сворачивает её. Карточки у принятого файла
+          // не существует — открывать нечего.
           onRowClick={(r) => {
+            if (isGroupHead(r)) {
+              toggleMachineGroup(r as MachineHeadRow);
+              return;
+            }
             if (isPendingRow(r)) return;
             setSelectedId(r.id);
           }}
-          columns={documentColumns}
-          cardRender={documentCardRender}
+          columns={withGroupRows<Row, MachineHeadRow>(documentColumns ?? [], renderMachineHead, {
+            selectionCell: !isContractor,
+          })}
+          cardRender={(r: TableRow) =>
+            isGroupHead(r) ? (
+              <Card size="small" style={{ width: '100%', background: '#f5f7fa' }}>
+                <Space size={8} align="start">
+                  <GroupToggle
+                    collapsed={(r as MachineHeadRow).collapsed}
+                    onToggle={() => toggleMachineGroup(r as MachineHeadRow)}
+                  />
+                  {renderMachineHead(r as MachineHeadRow, true)}
+                </Space>
+              </Card>
+            ) : (
+              documentCardRender(r as Row)
+            )
+          }
         />
       </StickyPageHeader>
       <UpdPdfUploadModal
@@ -1588,6 +1751,11 @@ export default function InboxPage() {
         open={docsModalOpen}
         direction={direction}
         onClose={() => setDocsModalOpen(false)}
+      />
+      <MachineMergeModal
+        documentIds={mergeIds}
+        onClose={() => setMergeIds(null)}
+        onMerged={onMerged}
       />
       <SourceDocumentDetailModal
         id={selectedId}

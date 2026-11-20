@@ -35,6 +35,7 @@ import { bundleDispatchKeyOf, enqueueJob, type JobQueue } from '../jobs/job-outb
 import type { RegistryRow } from './bundle-import-registry.js';
 import { manualRecipientSource } from './resolve-contractor.js';
 import { purgePreviousGeneration, resolveRestartEligibility } from './restart-eligibility.js';
+import { machineGuardForBundle } from './machine-operations.js';
 import { loadEnv } from '../../lib/env.js';
 import { buildS3Key } from '../storage/s3.path.js';
 import { putObject } from '../storage/s3.signer.js';
@@ -479,74 +480,72 @@ async function completePartialUpload(
   });
 
   const rowByOrdinal = new Map(matched.map(({ row }) => [row.inputOrder ?? 0, row]));
-  let completed = 0;
-  for (const file of uploaded) {
-    const row = rowByOrdinal.get(file.ordinal);
-    if (!row) continue;
-    // Ключ и статус — ОДНИМ обновлением: состояния «ключ уже есть, а строка ещё
-    // failed» существовать не должно, иначе параллельный проход увидит файл
-    // одновременно и потерянным, и загруженным.
-    //
-    // Условие `input_s3_key is null` — CAS: если вторая вкладка успела
-    // дозагрузить тот же файл, наш UPDATE ничего не изменит, и мы не перепишем
-    // чужой ключ на свой, оставив объект-сироту.
-    const done = await db
-      .update(bundleImportItems)
-      .set({
-        inputS3Key: file.s3Key,
-        status: 'accepted',
-        effectiveStatus: null,
-        reason: null,
-        mimeType: file.mimeType,
-        sizeBytes: file.sizeBytes,
-        contentSha256: file.sha256,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(bundleImportItems.id, row.id), isNull(bundleImportItems.inputS3Key)))
-      .returning({ id: bundleImportItems.id });
-    if (done.length > 0) {
-      completed++;
-    } else {
+
+  // Фиксация дозагрузки — ОДНОЙ транзакцией под замком машины: реестр, новое
+  // поколение задания и постановка разбора. Между решением «дозагружать» и
+  // этой записью планшет мог принять машину: дозагруженный файл стал бы
+  // документом машины, которую инспектор уже оформил. Поэтому занятость
+  // перепроверяется здесь, в той же транзакции, что и запись.
+  type Committed =
+    | { kind: 'locked'; orphanKeys: string[] }
+    | { kind: 'none'; orphanKeys: string[] }
+    | { kind: 'done'; completed: number; dispatchGeneration: number; jobId: string; orphanKeys: string[] };
+  const committed: Committed = await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const guard = await machineGuardForBundle(tx, bundle.id);
+    if (guard.busy) {
+      return { kind: 'locked' as const, orphanKeys: uploaded.map((f) => f.s3Key) };
+    }
+    let completed = 0;
+    const orphanKeys: string[] = [];
+    for (const file of uploaded) {
+      const row = rowByOrdinal.get(file.ordinal);
+      if (!row) continue;
+      // Ключ и статус — ОДНИМ обновлением: состояния «ключ уже есть, а строка
+      // ещё failed» существовать не должно, иначе параллельный проход увидит
+      // файл одновременно и потерянным, и загруженным.
+      //
+      // Условие `input_s3_key is null` — CAS: если вторая вкладка успела
+      // дозагрузить тот же файл, наш UPDATE ничего не изменит, и мы не
+      // перепишем чужой ключ на свой, оставив объект-сироту.
+      const done = await tx
+        .update(bundleImportItems)
+        .set({
+          inputS3Key: file.s3Key,
+          status: 'accepted',
+          effectiveStatus: null,
+          reason: null,
+          mimeType: file.mimeType,
+          sizeBytes: file.sizeBytes,
+          contentSha256: file.sha256,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(bundleImportItems.id, row.id), isNull(bundleImportItems.inputS3Key)))
+        .returning({ id: bundleImportItems.id });
+      if (done.length > 0) completed++;
       // Гонку проиграли — объект наш, а ссылки на него нет. В бакете он не
       // нужен: строку держит ключ победителя.
-      await scheduleS3Cleanup(db, bundle.id, [file.s3Key], log);
+      else orphanKeys.push(file.s3Key);
     }
-  }
+    if (completed === 0) return { kind: 'none' as const, orphanKeys };
 
-  if (completed === 0) {
-    if (publicSubmission) await recordPublicSubmission(db, bundle.id, publicSubmission);
-    return {
-      outcome: 'reused',
-      bundleId: bundle.id,
-      status: bundle.status,
-      ticket: publicSubmission?.ticket ?? null,
-    };
-  }
-
-  // Разбор надо запустить заново: дозагруженные строки лежат в `accepted`, а
-  // router пропускает только терминальные. Поколение ЗАДАНИЯ растёт, поколение
-  // ЗАГРУЗКИ — нет: файлы те же самые, реестр тот же.
-  const [bumped] = await db
-    .update(sourceBundles)
-    .set({
-      status: 'queued',
-      parseErrorCode: null,
-      parseErrorMessage: null,
-      dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
-      updatedAt: new Date(),
-    })
-    .where(eq(sourceBundles.id, bundle.id))
-    .returning();
-
-  const dispatchGeneration = bumped?.dispatchGeneration ?? bundle.dispatchGeneration;
-  const jobId = bundleDispatchKeyOf(bundle.id, dispatchGeneration);
-  await db.transaction(async (tx) => {
-    await tx
+    // Разбор надо запустить заново: дозагруженные строки лежат в `accepted`, а
+    // router пропускает только терминальные. Поколение ЗАДАНИЯ растёт,
+    // поколение ЗАГРУЗКИ — нет: файлы те же самые, реестр тот же.
+    const [bumped] = await tx
       .update(sourceBundles)
-      .set({ jobId })
-      .where(
-        and(eq(sourceBundles.id, bundle.id), eq(sourceBundles.dispatchGeneration, dispatchGeneration)),
-      );
+      .set({
+        status: 'queued',
+        parseErrorCode: null,
+        parseErrorMessage: null,
+        dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(eq(sourceBundles.id, bundle.id))
+      .returning();
+    const dispatchGeneration = bumped?.dispatchGeneration ?? bundle.dispatchGeneration;
+    const jobId = bundleDispatchKeyOf(bundle.id, dispatchGeneration);
+    await tx.update(sourceBundles).set({ jobId }).where(eq(sourceBundles.id, bundle.id));
 
     if (publicSubmission) {
       await tx.insert(ingestEvents).values({
@@ -560,14 +559,37 @@ async function completePartialUpload(
       });
     }
     if (params.dispatch === 'outbox') {
-      await enqueueJob(tx as unknown as Db, {
+      await enqueueJob(tx, {
         queue: UPD_PARSE_QUEUE,
         jobName: 'parse',
         payload: { bundleId: bundle.id, mode: 'router', bundleGeneration: dispatchGeneration },
         dedupeKey: jobId,
       });
     }
+    return { kind: 'done' as const, completed, dispatchGeneration, jobId, orphanKeys };
   });
+
+  // Объекты без строки реестра — в очистку S3 (после коммита: ссылки на них
+  // точно нет).
+  if (committed.orphanKeys.length > 0) {
+    await scheduleS3Cleanup(db, bundle.id, committed.orphanKeys, log);
+  }
+  if (committed.kind !== 'done') {
+    if (committed.kind === 'locked') {
+      log.warn(
+        { bundleId: bundle.id },
+        'приём пачки: машину уже приняли — дозагрузку не фиксируем, файлы в очистку',
+      );
+    }
+    if (publicSubmission) await recordPublicSubmission(db, bundle.id, publicSubmission);
+    return {
+      outcome: 'reused',
+      bundleId: bundle.id,
+      status: bundle.status,
+      ticket: publicSubmission?.ticket ?? null,
+    };
+  }
+  const { completed, dispatchGeneration, jobId } = committed;
   if (params.dispatch === 'direct') {
     await deps.queue.add(
       'parse',
@@ -775,48 +797,80 @@ export async function ingestDocumentsBundle(
     // published_generation остаётся на прошлом номере, а раз группа видна только
     // при published_generation = active_upload_generation, документы прошлого
     // поколения перестают быть видимыми в тот же момент.
-    const restart = reserve
-      ? await db
-          .update(sourceBundles)
-          .set({
-            ...bundleValues,
-            idempotencyKey,
-            contentHash,
-            dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
-            activeUploadGeneration: drSql`${sourceBundles.activeUploadGeneration} + 1`,
-            createdByUserId: params.actorUserId ?? existing.createdByUserId,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(sourceBundles.id, existing.id),
-              or(
-                drSql`${sourceBundles.updatedAt} < now() - make_interval(secs => ${ORPHAN_GRACE_MS / 1000})`,
-                eq(sourceBundles.status, 'parse_failed'),
+    // Перезапуск — ОДНОЙ транзакцией вместе с удалением прошлого поколения и
+    // под замком машины. Решение «перезапускать» принято выше без блокировок,
+    // а между ним и записью менеджер мог объединить эту отправку с другой
+    // (перезапуск снёс бы документы части объединённой машины), а планшет —
+    // принять машину (снёс бы документы, на которые ссылается приёмка).
+    // Поэтому здесь — свежая проверка в той же транзакции, что и запись.
+    // Подзапрос в WHERE условного UPDATE такого не ловит: в READ COMMITTED
+    // перепроверяется только сама строка, другие таблицы читаются по старому
+    // снимку.
+    const restartTx = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const guard = await machineGuardForBundle(tx, existing.id);
+      if (guard.merged) return { kind: 'reuse' as const, reason: 'merged_machine' as const };
+      if (guard.busy) return { kind: 'reuse' as const, reason: 'locked_by_operation' as const };
+      const restart = reserve
+        ? await tx
+            .update(sourceBundles)
+            .set({
+              ...bundleValues,
+              idempotencyKey,
+              contentHash,
+              dispatchGeneration: drSql`${sourceBundles.dispatchGeneration} + 1`,
+              activeUploadGeneration: drSql`${sourceBundles.activeUploadGeneration} + 1`,
+              createdByUserId: params.actorUserId ?? existing.createdByUserId,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(sourceBundles.id, existing.id),
+                or(
+                  drSql`${sourceBundles.updatedAt} < now() - make_interval(secs => ${ORPHAN_GRACE_MS / 1000})`,
+                  eq(sourceBundles.status, 'parse_failed'),
+                ),
               ),
-            ),
-          )
-          .returning()
-      : await db
-          .update(sourceBundles)
-          .set({
-            ...bundleValues,
-            idempotencyKey,
-            contentHash,
-            // Тот же инкремент, что и в reserve-ветке: внутренняя загрузка
-            // «Загрузить документы» проходит здесь, и оставить её на прежнем
-            // поколении значило бы сохранить мёртвую зону для половины входов.
-            activeUploadGeneration: drSql`${sourceBundles.activeUploadGeneration} + 1`,
-            createdByUserId: params.actorUserId ?? existing.createdByUserId,
-            updatedAt: now,
-          })
-          .where(eq(sourceBundles.id, existing.id))
-          .returning();
+            )
+            .returning()
+        : await tx
+            .update(sourceBundles)
+            .set({
+              ...bundleValues,
+              idempotencyKey,
+              contentHash,
+              // Тот же инкремент, что и в reserve-ветке: внутренняя загрузка
+              // «Загрузить документы» проходит здесь, и оставить её на прежнем
+              // поколении значило бы сохранить мёртвую зону для половины входов.
+              activeUploadGeneration: drSql`${sourceBundles.activeUploadGeneration} + 1`,
+              createdByUserId: params.actorUserId ?? existing.createdByUserId,
+              updatedAt: now,
+            })
+            .where(eq(sourceBundles.id, existing.id))
+            .returning();
+      const [updated] = restart;
+      if (!updated) return { kind: 'reuse' as const, reason: 'busy' as const };
+      // Пакет пересобирается с нуля, поэтому остатки прошлого поколения уходят.
+      //
+      // Без этого рестарт задваивает документы: реестр нового поколения
+      // заводится на ВСЕ файлы пачки, router разберёт каждый, и уцелевшие
+      // документы прошлого прогона останутся рядом с новыми. Инвариант
+      // видимости такого не ловит — он спрашивает «есть ли документ по s3Key»,
+      // а документ есть.
+      const purged = await purgePreviousGeneration(tx, existing.id);
+      return { kind: 'restarted' as const, updated, purged };
+    });
 
-    const [updated] = restart;
-    if (!updated) {
-      // CAS не сработал: пакет свежий, значит им занят кто-то другой.
-      // Повторная заливка тех же файлов только удвоила бы работу.
+    if (restartTx.kind === 'reuse') {
+      // CAS не сработал (пакет свежий, им занят кто-то другой), отправка вошла
+      // в объединённую машину или машину уже приняли — повторная заливка тех же
+      // файлов ничего бы не дала, а перезапуск снёс бы чужое.
+      if (restartTx.reason !== 'busy') {
+        log?.warn(
+          { bundleId: existing.id, reason: restartTx.reason },
+          'приём пачки: повторная отправка не перезапускает пакет',
+        );
+      }
       if (publicSubmission) await recordPublicSubmission(db, existing.id, publicSubmission);
       return {
         outcome: 'reused',
@@ -825,16 +879,7 @@ export async function ingestDocumentsBundle(
         ticket: publicSubmission?.ticket ?? null,
       };
     }
-    // Пакет пересобирается с нуля, поэтому остатки прошлого поколения уходят.
-    //
-    // Без этого рестарт задваивает документы: реестр нового поколения заводится
-    // на ВСЕ файлы пачки, router разберёт каждый, и уцелевшие документы прошлого
-    // прогона останутся рядом с новыми. Инвариант видимости такого не ловит — он
-    // спрашивает «есть ли документ по s3Key», а документ есть.
-    //
-    // Безопасно ровно потому, что сюда мы дошли с вердиктом `restart`: ни один
-    // документ не привязан к операции и разбор не идёт.
-    const purged = await db.transaction((tx) => purgePreviousGeneration(tx, existing.id));
+    const { updated, purged } = restartTx;
     if (purged.length > 0) {
       log?.warn(
         { bundleId: existing.id, documents: purged.length },

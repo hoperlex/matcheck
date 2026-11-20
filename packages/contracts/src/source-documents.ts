@@ -813,6 +813,27 @@ export const SourceDocumentSchema = z.object({
   // объекта переносит поставку ЦЕЛИКОМ, и менеджер должен видеть, скольких
   // строк это коснётся, до сохранения. Непустое там же, где portalGroupId.
   portalGroupSize: z.number().int().nullable().optional(),
+  // Сводка машины для строки группы в списке «Документы» (скобка «−/+»).
+  // Только портал и только список: /sync её не отдаёт. Считается по ВСЕЙ
+  // машине, а не по строкам страницы, — «найдено M из N» при фильтре честное.
+  machine: z
+    .object({
+      /** Голова машины (= portalGroupId). */
+      id: z.string().uuid(),
+      /** Нетехнических документов в машине. */
+      documentCount: z.number().int(),
+      /** Отправок с /uploads в машине; больше одной — объединена вручную. */
+      uploadCount: z.number().int(),
+      /** Номера приёмок (display_id), в которые попали документы машины. */
+      deliveryNumbers: z.array(z.number().int()),
+    })
+    .nullable()
+    .optional(),
+  // Карточка документа: сколько отправок в машине, если она объединена
+  // вручную (> 1), и её полный состав — его «Разъединить» шлёт как
+  // expectedDocumentIds. Только detail портала.
+  machineMergedUploads: z.number().int().nullable().optional(),
+  machineDocumentIds: z.array(z.string().uuid()).optional(),
 });
 export type SourceDocument = z.infer<typeof SourceDocumentSchema>;
 

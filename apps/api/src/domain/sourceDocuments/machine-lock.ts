@@ -18,10 +18,192 @@
 // пачка файлов не означает один рейс, и правка увела бы и соседей, и будущие
 // файлы.
 
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { sourceBundles, sourceDocuments } from '../../db/schema.js';
 import { bundleIdentityHashOf, replaceScopeInIdempotencyKey } from './bundle-key.js';
+
+// ─── Замок машины ───────────────────────────────────────────────────────────
+//
+// Машина может состоять из нескольких отправок (machine_merges): голова и
+// участники. Её документы лежат в пакетах разных корней, и бамп «всех
+// документов машины» трогает строки, которые одновременно может писать другая
+// транзакция — воркер, разбирающий соседний документ, или портал. Без общего
+// порядка это цикл: каждый держит свой документ и ждёт чужой. Тот же цикл был
+// и до объединений, внутри одной отправки: переразбор писал свой документ, а
+// потом бампал всех соседей.
+//
+// Правило: любая транзакция, которая меняет содержимое или состав машины
+// (бамп ревизии, публикация, переходы видимости по машине, слияние,
+// разъединение, перенос, создание приёмки с claim), ПЕРВЫМ действием берёт
+// строку головы. Тогда ожидать чужой документ может только держатель головы, и
+// цикла не остаётся. Функции бампа принимают MachineHeadLock — без захвата их
+// не вызвать.
+
+declare const machineHeadLockBrand: unique symbol;
+
+/**
+ * Доказательство, что транзакция держит замок машины. Создаётся только
+ * lockMachineHead/lockMachine — снаружи модуля его не собрать.
+ */
+export type MachineHeadLock = {
+  readonly [machineHeadLockBrand]: true;
+  /** Голова машины; null — у документа нет пакета (ЭДО, почта): машины нет. */
+  readonly headId: string | null;
+};
+
+function headLockOf(headId: string | null): MachineHeadLock {
+  return { headId } as MachineHeadLock;
+}
+
+/** Голова сменилась несколько раз подряд, пока мы пытались её захватить. */
+export class MachineHeadMovedError extends Error {
+  constructor(readonly target: { documentId?: string; bundleId?: string }) {
+    super('голова машины меняется прямо сейчас — повторите');
+    this.name = 'MachineHeadMovedError';
+  }
+}
+
+type HeadTarget = { documentId: string } | { bundleId: string };
+
+/**
+ * Голова машины без блокировок: корень пакета и его запись в machine_merges.
+ * null — документа нет или у него нет пакета.
+ */
+export async function resolveHead(tx: Db, target: HeadTarget): Promise<string | null> {
+  const bundleExpr =
+    'documentId' in target
+      ? sql`(select bundle_id from ${sourceDocuments} where id = ${target.documentId}::uuid)`
+      : sql`${target.bundleId}::uuid`;
+  const rows = await tx.execute<{ head_id: string | null }>(sql`
+    select coalesce(mm.target_root_id, r.root_id) as head_id
+      from (
+        select coalesce(b.parent_bundle_id, b.id) as root_id
+          from ${sourceBundles} b
+         where b.id = ${bundleExpr}
+      ) r
+      left join machine_merges mm on mm.member_root_id = r.root_id
+  `);
+  return [...rows][0]?.head_id ?? null;
+}
+
+const HEAD_LOCK_ATTEMPTS = 5;
+
+/**
+ * Берёт замок машины документа (или пакета): строку головы FOR UPDATE.
+ *
+ * Вызывать ПЕРВЫМ действием транзакции — до любой записи документов, иначе
+ * порядок «голова → участники → дети → документы» нарушен и цикл возвращается.
+ *
+ * Голову вычисляем до захвата, а слияние или разъединение может закоммититься
+ * между вычислением и захватом. Поэтому захват — под точкой сохранения: после
+ * него голова перечитывается, и если она сменилась, откат к точке снимает
+ * блокировку (строка, запертая отменённой подтранзакцией, свободна), и мы
+ * пробуем заново. Вызывающему повторять транзакцию не нужно — это важно для
+ * воркера, у которого внутри транзакции есть состояние, не переживающее повтор.
+ */
+export async function lockMachineHead(tx: Db, target: HeadTarget): Promise<MachineHeadLock> {
+  for (let attempt = 0; attempt < HEAD_LOCK_ATTEMPTS; attempt++) {
+    const headId = await resolveHead(tx, target);
+    if (!headId) return headLockOf(null);
+    const stable = await tx
+      .transaction(async (sp) => {
+        const spDb = sp as unknown as Db;
+        await spDb.execute(sql`select id from ${sourceBundles} where id = ${headId}::uuid for update`);
+        const again = await resolveHead(spDb, target);
+        if (again !== headId) throw new HeadMovedSignal();
+        return true;
+      })
+      .catch((err: unknown) => {
+        if (err instanceof HeadMovedSignal) return false;
+        throw err;
+      });
+    if (stable) return headLockOf(headId);
+  }
+  throw new MachineHeadMovedError(target);
+}
+
+class HeadMovedSignal extends Error {}
+
+/**
+ * Захватывает головы НЕСКОЛЬКИХ машин сразу — для слияния, которое меняет
+ * состав всех участвующих машин одной операцией.
+ *
+ * Порядок — по возрастанию id, как у lockMachinesOrdered: две такие операции
+ * встречаются на первой общей голове, а не держат по половине.
+ *
+ * Перепроверку «голова не сменилась» делает вызывающий: он знает, от каких
+ * документов головы вычислены. При расхождении — MachineHeadMovedError и
+ * повтор всей транзакции (lib/db-retry.ts).
+ */
+export async function lockHeadsOrdered(
+  tx: Db,
+  headIds: string[],
+): Promise<Map<string, MachineHeadLock>> {
+  const sorted = [...new Set(headIds)].sort();
+  for (const id of sorted) {
+    await tx.execute(sql`select id from ${sourceBundles} where id = ${id}::uuid for update`);
+  }
+  return new Map(sorted.map((id) => [id, headLockOf(id)]));
+}
+
+/**
+ * Захватывает всё, что ниже голов: корни-участники, дочерние пакеты, документы
+ * — каждый уровень целиком по возрастанию id. Головы уже захвачены
+ * (lockHeadsOrdered), поэтому состав машин здесь стабилен.
+ *
+ * Возвращает корни каждой головы и id всех документов (включая технические).
+ */
+export async function lockMachineBodies(
+  tx: Db,
+  headIds: string[],
+): Promise<{ rootsByHead: Map<string, string[]>; documentIds: string[] }> {
+  const rootsByHead = new Map<string, string[]>();
+  for (const head of [...new Set(headIds)].sort()) {
+    rootsByHead.set(head, await machineRootIdsOf(tx, head));
+  }
+  const allRoots = [...new Set([...rootsByHead.values()].flat())].sort();
+  const members = allRoots.filter((id) => !rootsByHead.has(id));
+  const idList = (ids: string[]) =>
+    sql.join(
+      ids.map((id) => sql`${id}::uuid`),
+      sql`, `,
+    );
+  if (members.length > 0) {
+    await tx.execute(sql`
+      select id from ${sourceBundles} where id in (${idList(members)}) order by id for update
+    `);
+  }
+  if (allRoots.length === 0) return { rootsByHead, documentIds: [] };
+  await tx.execute(sql`
+    select id from ${sourceBundles}
+     where parent_bundle_id in (${idList(allRoots)})
+     order by id
+       for update
+  `);
+  const docs = await tx.execute<{ id: string }>(sql`
+    select sd.id
+      from ${sourceDocuments} sd
+      join ${sourceBundles} b on b.id = sd.bundle_id
+     where coalesce(b.parent_bundle_id, b.id) in (${idList(allRoots)})
+     order by sd.id
+       for update of sd
+  `);
+  return { rootsByHead, documentIds: [...docs].map((r) => r.id) };
+}
+
+/**
+ * Корни машины, которой правит голова: она сама и её участники, по id.
+ * Читать только под замком головы — иначе состав может смениться.
+ */
+export async function machineRootIdsOf(tx: Db, headId: string): Promise<string[]> {
+  const rows = await tx.execute<{ id: string }>(sql`
+    select ${headId}::uuid as id
+    union all
+    select member_root_id as id from machine_merges where target_root_id = ${headId}::uuid
+  `);
+  return [...rows].map((r) => r.id).sort();
+}
 
 export type MachineDoc = {
   id: string;
@@ -40,14 +222,21 @@ export type MachineDoc = {
 };
 
 export type MachineLock = {
-  /** Корень машины; null — документ не из публичной загрузки, он сам по себе. */
+  /**
+   * Голова машины; null — документ не из публичной загрузки, он сам по себе.
+   * У необъединённой машины голова — её корневой пакет, как и раньше.
+   */
   machineRootId: string | null;
-  /** Пакеты машины: корень и дочерние, в порядке блокировки. */
+  /** Корни машины: голова и участники объединения, по id. */
+  rootIds: string[];
+  /** Пакеты машины: корни и дочерние, в порядке блокировки. */
   bundleIds: string[];
   /** Все документы машины, включая технические. */
   docs: MachineDoc[];
   /** Документ, который правят. */
   self: MachineDoc;
+  /** Замок головы — для функций бампа. */
+  head: MachineHeadLock;
 };
 
 type LockedDocRow = {
@@ -57,29 +246,15 @@ type LockedDocRow = {
   is_technical: boolean;
 };
 
-/**
- * Корень машины портала, в которую входит документ; null — документ не из
- * публичной загрузки (машины не образует) или его нет. Без блокировок.
- */
-async function portalMachineRootOf(tx: Db, documentId: string): Promise<string | null> {
-  const [head] = await tx
-    .select({ bundleId: sourceDocuments.bundleId })
-    .from(sourceDocuments)
-    .where(eq(sourceDocuments.id, documentId))
-    .limit(1);
-  if (!head?.bundleId) return null;
-  const rootRows = await tx.execute<{ root_id: string; is_portal: boolean }>(sql`
-    select coalesce(b.parent_bundle_id, b.id) as root_id,
-           exists (
-             select 1 from ingest_events ie
-              where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
-                and ie.channel = 'public'
-           ) as is_portal
-      from ${sourceBundles} b
-     where b.id = ${head.bundleId}::uuid
+/** Есть ли у корня событие публичной загрузки — то есть машина ли это для портала. */
+async function isPortalRoot(tx: Db, rootId: string): Promise<boolean> {
+  const rows = await tx.execute<{ yes: boolean }>(sql`
+    select exists (
+      select 1 from ingest_events ie
+       where ie.bundle_id = ${rootId}::uuid and ie.channel = 'public'
+    ) as yes
   `);
-  const root = [...rootRows][0];
-  return root?.is_portal ? root.root_id : null;
+  return [...rows][0]?.yes === true;
 }
 
 /**
@@ -87,7 +262,7 @@ async function portalMachineRootOf(tx: Db, documentId: string): Promise<string |
  * поставки сразу («Заменить» в разрешении дубликата: удаляется оригинал из
  * одной машины, копия из другой распознаётся заново).
  *
- * Порядок между машинами фиксированный — по ключу «корень машины, иначе id
+ * Порядок между машинами фиксированный — по ключу «голова машины, иначе id
  * документа», по возрастанию. Внутри машины порядок прежний (lockMachine).
  * Два документа одной машины блокируются дважды одной транзакцией — это
  * безопасно: свои блокировки не ждут.
@@ -100,7 +275,7 @@ export async function lockMachinesOrdered(
 ): Promise<Map<string, MachineLock | null>> {
   const keyed: { id: string; key: string }[] = [];
   for (const id of new Set(documentIds)) {
-    keyed.push({ id, key: (await portalMachineRootOf(tx, id)) ?? id });
+    keyed.push({ id, key: (await resolveHead(tx, { documentId: id })) ?? id });
   }
   keyed.sort((a, b) =>
     a.key < b.key ? -1 : a.key > b.key ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
@@ -113,29 +288,54 @@ export async function lockMachinesOrdered(
 /**
  * Блокирует машину документа и возвращает её состав.
  *
- * Вызывать ПЕРВЫМ действием транзакции правки документа — см. порядок
- * блокировок в шапке файла. `null` означает, что документа нет вовсе.
+ * Порядок: голова (lockMachineHead) → корни-участники по id → дочерние пакеты
+ * по id → документы по id. Тот же порядок у слияния и разъединения, а воркер
+ * берёт голову раньше любых своих записей.
+ *
+ * Вызывать ПЕРВЫМ действием транзакции правки документа. `null` означает, что
+ * документа нет вовсе.
  */
 export async function lockMachine(tx: Db, documentId: string): Promise<MachineLock | null> {
-  // Корень машины и признак публичной загрузки — до блокировок, чтобы знать, что
-  // именно блокировать. Значения перечитываются ниже уже под блокировкой.
-  const machineRootId = await portalMachineRootOf(tx, documentId);
+  const head = await lockMachineHead(tx, { documentId });
 
+  // Машина для портала — только публичная загрузка: у почты, ЭДО и внутренних
+  // загрузок пачка файлов не означает один рейс, и документ правится один.
+  // Голова объединённой машины всегда публичная: слияние других не принимает.
+  const machineRootId =
+    head.headId && (await isPortalRoot(tx, head.headId)) ? head.headId : null;
+
+  const rootIds: string[] = [];
   const bundleIds: string[] = [];
   if (machineRootId) {
-    // 1) корень, 2) дочерние пакеты по возрастанию id — фиксированный порядок
-    // против взаимной блокировки двух правок внутри одного дерева.
-    await tx.execute(sql`
-      select id from ${sourceBundles} where id = ${machineRootId}::uuid for update
-    `);
+    // Участники читаются под замком головы: всякий, кто пишет machine_merges,
+    // сперва берёт голову, значит состав здесь уже не изменится.
+    const roots = await machineRootIdsOf(tx, machineRootId);
+    const members = roots.filter((id) => id !== machineRootId);
+    if (members.length > 0) {
+      await tx.execute(sql`
+        select id from ${sourceBundles}
+         where id in (${sql.join(
+           members.map((id) => sql`${id}::uuid`),
+           sql`, `,
+         )})
+         order by id
+           for update
+      `);
+    }
+    // Дочерние пакеты всех корней по возрастанию id — фиксированный порядок
+    // против взаимной блокировки двух правок внутри одной машины.
     const children = await tx.execute<{ id: string }>(sql`
       select id
         from ${sourceBundles}
-       where parent_bundle_id = ${machineRootId}::uuid
+       where parent_bundle_id in (${sql.join(
+         roots.map((id) => sql`${id}::uuid`),
+         sql`, `,
+       )})
        order by id
          for update
     `);
-    bundleIds.push(machineRootId, ...[...children].map((r) => r.id));
+    rootIds.push(...roots);
+    bundleIds.push(machineRootId, ...members, ...[...children].map((r) => r.id));
   }
 
   // Документы машины — под блокировкой, после пакетов. Технические тоже: из них
@@ -148,7 +348,10 @@ export async function lockMachine(tx: Db, documentId: string): Promise<MachineLo
                sd.is_technical
           from ${sourceDocuments} sd
           join ${sourceBundles} b on b.id = sd.bundle_id
-         where coalesce(b.parent_bundle_id, b.id) = ${machineRootId}::uuid
+         where coalesce(b.parent_bundle_id, b.id) in (${sql.join(
+           rootIds.map((id) => sql`${id}::uuid`),
+           sql`, `,
+         )})
          order by sd.id
            for update of sd
       `)
@@ -170,7 +373,7 @@ export async function lockMachine(tx: Db, documentId: string): Promise<MachineLo
   const self = docs.find((d) => d.id === documentId);
   if (!self) return null;
 
-  return { machineRootId, bundleIds, docs, self };
+  return { machineRootId, rootIds, bundleIds, docs, self, head };
 }
 
 /**
@@ -195,25 +398,24 @@ export async function resyncMachineBundleKeys(
   if (!lock.machineRootId) return;
   if (!('siteId' in scope) && !('expectedDate' in scope)) return;
 
-  const [rootRow] = await tx
-    .select({ idempotencyKey: sourceBundles.idempotencyKey })
+  // Все корни машины, а не только голова: у объединённой машины каждая
+  // отправка несёт свой ключ, и повторная отправка любой из них со старыми
+  // объектом или датой иначе узнала бы свой пакет.
+  const rootRows = await tx
+    .select({ id: sourceBundles.id, idempotencyKey: sourceBundles.idempotencyKey })
     .from(sourceBundles)
-    .where(eq(sourceBundles.id, lock.machineRootId))
-    .limit(1);
-  const currentKey = rootRow?.idempotencyKey ?? null;
-  const nextKey = currentKey ? replaceScopeInIdempotencyKey(currentKey, scope) : null;
-  // Ключа нет (legacy-строки до перевода writers) или он чужого формата — не
-  // трогаем ничего: уникальность по ключу частичная и на такие пакеты не
-  // распространяется, а bundle_hash у них исторический.
-  if (!nextKey || !currentKey || nextKey === currentKey) return;
+    .where(inArray(sourceBundles.id, lock.rootIds.length ? lock.rootIds : [lock.machineRootId]));
+  for (const rootRow of rootRows) {
+    const currentKey = rootRow.idempotencyKey ?? null;
+    const nextKey = currentKey ? replaceScopeInIdempotencyKey(currentKey, scope) : null;
+    // Ключа нет (legacy-строки до перевода writers) или он чужого формата — не
+    // трогаем ничего: уникальность по ключу частичная и на такие пакеты не
+    // распространяется, а bundle_hash у них исторический.
+    if (!nextKey || !currentKey || nextKey === currentKey) continue;
 
-  await tx
-    .update(sourceBundles)
-    .set({ idempotencyKey: nextKey, bundleHash: bundleIdentityHashOf(nextKey) })
-    .where(
-      and(
-        eq(sourceBundles.id, lock.machineRootId),
-        eq(sourceBundles.idempotencyKey, currentKey),
-      ),
-    );
+    await tx
+      .update(sourceBundles)
+      .set({ idempotencyKey: nextKey, bundleHash: bundleIdentityHashOf(nextKey) })
+      .where(and(eq(sourceBundles.id, rootRow.id), eq(sourceBundles.idempotencyKey, currentKey)));
+  }
 }

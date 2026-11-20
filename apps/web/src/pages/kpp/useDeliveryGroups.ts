@@ -1,4 +1,3 @@
-import { useCallback, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   DeliveryGroupComposeRequest,
@@ -7,45 +6,16 @@ import type {
   DeliveryGroupLeaveResponse,
 } from '@matcheck/contracts';
 import { api } from '../../services/api';
+import { useCollapsedGroups } from '../../shared/ui/groupRows';
 
 const COLLAPSED_KEY = 'matcheck.deliveryGroups.collapsed';
-const COLLAPSED_MAX = 300;
 
-function readCollapsed(): string[] {
-  try {
-    const raw = window.localStorage.getItem(COLLAPSED_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Свёрнутые группы — удобство этого браузера, не общее состояние: хранилище
- * может быть пустым или недоступным (приватное окно), тогда всё развёрнуто.
- * Помним последние 300, чтобы список не рос бесконечно.
- */
+/** Свёрнутые группы приёмок — общий хук shared/ui/groupRows.ts, свой ключ. */
 export function useCollapsedDeliveryGroups(): {
   collapsed: ReadonlySet<string>;
   toggle: (groupId: string) => void;
 } {
-  const [ids, setIds] = useState<string[]>(readCollapsed);
-  const collapsed = useMemo(() => new Set(ids), [ids]);
-  const toggle = useCallback((groupId: string) => {
-    setIds((prev) => {
-      const next = prev.includes(groupId)
-        ? prev.filter((id) => id !== groupId)
-        : [...prev, groupId].slice(-COLLAPSED_MAX);
-      try {
-        window.localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
-      } catch {
-        // Без хранилища свёрнутость живёт до перезагрузки — это не ошибка.
-      }
-      return next;
-    });
-  }, []);
-  return { collapsed, toggle };
+  return useCollapsedGroups(COLLAPSED_KEY);
 }
 
 /** Сбор, уход и роспуск группы; после любого — список и состав перечитываются. */

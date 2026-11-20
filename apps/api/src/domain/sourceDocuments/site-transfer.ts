@@ -17,21 +17,21 @@
 // пакета) переносится ПООДИНОЧКЕ и пакет не трогает: там пачка файлов не
 // означает один рейс, и перенос пакета увёл бы и соседей, и будущие файлы.
 
-import { eq, inArray, sql } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import {
-  deliverySources,
-  deliveryEdoMatches,
-  operationGroupClaims,
-  shipmentSources,
-  sourceBundles,
-  sourceDocuments,
-} from '../../db/schema.js';
+import { sourceBundles, sourceDocuments } from '../../db/schema.js';
+import { machineMergeEnabledForSite } from '../groups/claim-scope.js';
+import { hasMachineOperations, machineOperations } from './machine-operations.js';
 import type { MachineLock } from './machine-lock.js';
 
 export type SiteTransferConflict =
   /** По машине уже оформлена приёмка или отгрузка — объект менять нельзя. */
-  { error: 'machine_has_operation'; deliveries: number; shipments: number };
+  | { error: 'machine_has_operation'; deliveries: number; shipments: number }
+  /**
+   * Объединённая машина переезжает только туда, где объединение включено:
+   * иначе её примут на объекте без защиты «одна машина — одна приёмка».
+   */
+  | { error: 'target_site_not_ready' };
 
 export type SiteTransfer =
   /** Объект не изменился — писать нечего. */
@@ -103,34 +103,24 @@ export async function transferSite(
   if ((fromSiteId ?? null) === (toSiteId ?? null))
     return { ok: true, transfer: { changed: false } };
 
-  const docIds = lock.docs.map((d) => d.id);
-  const [{ count: deliveriesCount } = { count: 0 }] = await tx
-    .select({ count: sql<number>`count(*)::int` })
-    .from(deliverySources)
-    .where(inArray(deliverySources.sourceDocumentId, docIds));
-  const [{ count: edoMatchesCount } = { count: 0 }] = await tx
-    .select({ count: sql<number>`count(*)::int` })
-    .from(deliveryEdoMatches)
-    .where(inArray(deliveryEdoMatches.sourceDocumentId, docIds));
-  const [{ count: shipmentsCount } = { count: 0 }] = await tx
-    .select({ count: sql<number>`count(*)::int` })
-    .from(shipmentSources)
-    .where(inArray(shipmentSources.sourceDocumentId, docIds));
-  // Claim пока не занимает никто (enforceGroupClaim в бою не вызывается), но
+  if (lock.rootIds.length > 1 && !machineMergeEnabledForSite(toSiteId)) {
+    return { conflict: { error: 'target_site_not_ready' } };
+  }
+
+  // Общая проверка с слиянием и разъединением (machine-operations.ts). Claim
+  // пока не занимает никто (enforceGroupClaim в бою не вызывается), но
   // проверка бесплатна и станет значимой в тот день, когда его подключат.
-  const claims = lock.machineRootId
-    ? await tx
-        .select({ groupId: operationGroupClaims.groupId })
-        .from(operationGroupClaims)
-        .where(eq(operationGroupClaims.groupId, lock.machineRootId))
-        .limit(1)
-    : [];
-  if (deliveriesCount > 0 || edoMatchesCount > 0 || shipmentsCount > 0 || claims.length > 0) {
+  const ops = await machineOperations(
+    tx,
+    lock.docs.map((d) => d.id),
+    lock.machineRootId ? [lock.machineRootId] : [],
+  );
+  if (hasMachineOperations(ops)) {
     return {
       conflict: {
         error: 'machine_has_operation',
-        deliveries: deliveriesCount + edoMatchesCount,
-        shipments: shipmentsCount,
+        deliveries: ops.deliveries + ops.edoMatches,
+        shipments: ops.shipments,
       },
     };
   }

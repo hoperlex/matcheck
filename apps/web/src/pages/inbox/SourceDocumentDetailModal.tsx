@@ -69,6 +69,7 @@ import { ResponsiblePersonSelect } from '../../components/ResponsiblePersonSelec
 import { DocumentOriginalViewer } from '../shared/DocumentOriginalViewer';
 import { SourceDocumentItemsTable } from '../shared/SourceDocumentItemsTable';
 import { DuplicateTrailAlerts } from './DuplicateTrailAlerts';
+import { useMachineUnmergeMutation } from './useMachineMerge';
 
 type Item = SourceDocumentDetail['items'][number];
 
@@ -217,6 +218,9 @@ function patchErrorText(err: Error): string {
     }
     if (err.code === 'bundle_exists_on_site') {
       return 'На выбранном объекте этот комплект документов уже загружен — переносить некуда.';
+    }
+    if (err.code === 'target_site_not_ready') {
+      return 'Машина собрана из нескольких отправок, а на выбранном объекте объединение не включено — сначала разъедините её.';
     }
   }
   return err.message;
@@ -998,11 +1002,21 @@ export function SourceDocumentDetailModal({
                       // переносит ВСЮ машину вместе с пакетом (см. transferSite
                       // на сервере). Менеджер должен знать это до сохранения.
                       extra={
-                        sd.portalGroupId
-                          ? `Поставка загружена через портал: объект сменится у всей машины${
+                        sd.portalGroupId ? (
+                          <>
+                            {`Поставка загружена через портал: объект сменится у всей машины${
                               sd.portalGroupSize ? ` (${sd.portalGroupSize} док.)` : ''
-                            }.`
-                          : undefined
+                            }.`}
+                            {sd.machineMergedUploads ? (
+                              <MachineMergedNote
+                                documentId={sd.id}
+                                uploads={sd.machineMergedUploads}
+                                documentIds={sd.machineDocumentIds ?? []}
+                                canUnmerge={canEditDocument}
+                              />
+                            ) : null}
+                          </>
+                        ) : undefined
                       }
                     >
                       <SiteSelect
@@ -1506,5 +1520,57 @@ function EditableTable({
       </Button>
 
     </>
+  );
+}
+
+/**
+ * «Машина собрана вручную из N отправок» и «Разъединить» — в карточке
+ * документа объединённой машины. Состав, который видел менеджер, уходит в
+ * запрос: если машину успели изменить, сервер откажет, а не разъединит чужое.
+ */
+function MachineMergedNote({
+  documentId,
+  uploads,
+  documentIds,
+  canUnmerge,
+}: {
+  documentId: string;
+  uploads: number;
+  documentIds: string[];
+  canUnmerge: boolean;
+}) {
+  const unmerge = useMachineUnmergeMutation();
+  return (
+    <div style={{ marginTop: 4 }}>
+      Машина собрана вручную из {uploads} отправок.{' '}
+      {canUnmerge && (
+        <Popconfirm
+          title="Разъединить машину?"
+          description="Все отправки вернутся в исходные машины, на планшете снова будут отдельные карточки"
+          okText="Разъединить"
+          cancelText="Отмена"
+          onConfirm={() =>
+            unmerge.mutate(
+              { documentId, expectedDocumentIds: documentIds },
+              {
+                onSuccess: () => void message.success('Машина разъединена'),
+                onError: (err) =>
+                  void message.error(
+                    err instanceof ApiError && err.code === 'composition_changed'
+                      ? 'Состав машины изменился — закройте карточку и проверьте ещё раз'
+                      : err instanceof Error
+                        ? err.message
+                        : 'Не удалось разъединить',
+                  ),
+              },
+            )
+          }
+        >
+          <Button size="small" type="link" loading={unmerge.isPending} style={{ padding: 0 }}>
+            Разъединить
+          </Button>
+        </Popconfirm>
+      )}
+    </div>
   );
 }

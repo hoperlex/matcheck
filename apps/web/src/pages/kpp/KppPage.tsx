@@ -8,6 +8,7 @@ import {
   Dropdown,
   Input,
   InputNumber,
+  Modal,
   Popconfirm,
   Row,
   Select,
@@ -1178,10 +1179,15 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
   // на 1/2 этапах. IDB не трогаем: операция на портале, локальный
   // snapshot инспектора обновится при следующем pullSync.
   const linkUpd = useMutation({
-    mutationFn: async (upd: { id: string }): Promise<Delivery> => {
+    mutationFn: async (upd: {
+      id: string;
+      /** Осознанная вторая приёмка по уже занятой машине — после подтверждения. */
+      allowSecondOperation?: boolean;
+    }): Promise<Delivery> => {
       if (!loadedDelivery) throw new Error('Приёмка ещё не загружена');
       return await api.post<Delivery>(`/deliveries/${loadedDelivery.id}/link-source`, {
         sourceDocumentId: upd.id,
+        ...(upd.allowSecondOperation ? { allowSecondOperation: true } : {}),
       });
     },
     onSuccess: async (dto, upd) => {
@@ -1237,7 +1243,19 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
       void queryClient.invalidateQueries({ queryKey: ['reports', 'operations-counters'] });
       void queryClient.invalidateQueries({ queryKey: ['source-documents'] });
     },
-    onError: (err: Error) => {
+    onError: (err: Error, upd) => {
+      // Машина документа уже в другой приёмке (протокол «одна машина — одна
+      // приёмка»): вторую — только осознанно, после подтверждения.
+      if (err instanceof ApiError && err.code === 'group_claimed' && !upd.allowSecondOperation) {
+        Modal.confirm({
+          title: err.message,
+          content: 'Привязать документ и к этой приёмке? Машина окажется в двух приёмках.',
+          okText: 'Всё равно привязать',
+          cancelText: 'Отмена',
+          onOk: () => linkUpd.mutate({ ...upd, allowSecondOperation: true }),
+        });
+        return;
+      }
       setLinkUpdError(err.message);
     },
   });

@@ -35,6 +35,7 @@ import { dedupeAssemblyItems } from '../src/domain/edo/upd-assembly-merge.js';
 import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
 import { deriveUpdParseOutcome } from '../src/domain/edo/upd-outcome.js';
 import { bumpGroupRevision } from '../src/domain/sourceDocuments/document-group.js';
+import { lockMachineHead } from '../src/domain/sourceDocuments/machine-lock.js';
 
 function argValue(flag: string): string | null {
   const i = process.argv.indexOf(flag);
@@ -150,6 +151,8 @@ async function main(): Promise<void> {
     }
 
     await db.transaction(async (tx) => {
+      // Замок машины — первым действием, до записи документа (machine-lock.ts).
+      const machine = await lockMachineHead(tx as unknown as typeof db, { documentId: keeperId });
       // Между отчётом и записью приёмку могли создать — проверяем ещё раз,
       // уже под блокировкой документа.
       const [locked] = await tx
@@ -262,7 +265,7 @@ async function main(): Promise<void> {
 
       // Ревизия машины — в той же транзакции: открытая на планшете форма
       // приёмки иначе не узнает, что состав документа изменился.
-      await bumpGroupRevision(tx, keeperId);
+      await bumpGroupRevision(tx, machine);
       repaired++;
       console.log(`    исправлено · статус ${outcome.status}`);
     });

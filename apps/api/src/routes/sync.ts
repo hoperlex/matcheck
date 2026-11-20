@@ -605,6 +605,11 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
       const deletedDeliveryIds: string[] = [];
       const deletedShipmentIds: string[] = [];
       const deletedSourceDocumentIds: string[] = [];
+      // Документы, удалённые физически (entity_deletions), — в отличие от
+      // скрытых меткой видимости. Новая сборка планшета различает их
+      // (deletedReasons): строки черновика по скрытому документу хранятся до
+      // его возвращения, по удалённому — убираются.
+      const hardDeletedSourceDocumentIds = new Set<string>();
       const deletedResponsiblePersonIds: string[] = [];
       const deletedAssetIds: string[] = [];
       if (since) {
@@ -626,6 +631,7 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           else if (r.entityType === 'shipment') deletedShipmentIds.push(r.entityId);
           else if (r.entityType === 'source_document')
             deletedSourceDocumentIds.push(r.entityId);
+            hardDeletedSourceDocumentIds.add(r.entityId);
         }
         // 2) Глобальные справочники (siteId IS NULL) — независимо от роли.
         const globalDel = await app.db
@@ -756,6 +762,20 @@ export async function syncRoutes(rawApp: FastifyInstance): Promise<void> {
           responsiblePersons: deletedResponsiblePersonIds,
           assets: deletedAssetIds,
         },
+        // Почему документ ушёл из выдачи — аддитивно к deletedIds, старые
+        // сборки поле игнорируют. Отдаётся только при непустом списке.
+        ...(dedupedDeletedSourceDocumentIds.length
+          ? {
+              deletedReasons: {
+                sourceDocuments: Object.fromEntries(
+                  dedupedDeletedSourceDocumentIds.map((id) => [
+                    id,
+                    hardDeletedSourceDocumentIds.has(id) ? ('deleted' as const) : ('hidden' as const),
+                  ]),
+                ),
+              },
+            }
+          : {}),
         counterparties: cpRows.map((c) => ({
           id: c.id,
           inn: c.inn,

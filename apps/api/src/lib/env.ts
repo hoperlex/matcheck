@@ -536,6 +536,37 @@ const envSchema = z.object({
         .filter(Boolean),
     ),
 
+  // Протокол «одна машина — одна приёмка» (domain/groups/claim.ts). Объекты,
+  // где создание приёмки по документам машины проходит через занятие машины:
+  // второй планшет получает typed-отказ group_claimed, а клиент без capability
+  // group_claim_v1 — 426 client_outdated (старая сборка не умеет такие ответы).
+  // Пусто — нигде, как до выпуска; '*' — везде.
+  GROUP_CLAIM_SITES: z
+    .string()
+    .default('')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+
+  // Объединение машин в «Документах» («Объединить в одну машину»). Объекты, где
+  // менеджер может объединять отправки; пусто — нигде (маршруты отвечают 409
+  // machine_merge_disabled), '*' — везде.
+  // ОБЯЗАН быть подмножеством GROUP_CLAIM_SITES — проверяется при загрузке
+  // окружения: объединённая машина безопасна только там, где действует
+  // протокол занятия, иначе её примут по частям на двух планшетах.
+  MACHINE_MERGE_SITES: z
+    .string()
+    .default('')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+
   // DB / Redis
   DATABASE_URL: z.string().url().optional(),
   DATABASE_POOL_MAX: z.coerce.number().int().positive().default(30),
@@ -995,6 +1026,28 @@ export function loadEnv(): Env {
       .join('\n');
     throw new Error(`Invalid environment variables:\n${issues}`);
   }
+  assertMergeSitesWithinClaimSites(parsed.data);
   cached = parsed.data;
   return cached;
+}
+
+/**
+ * Объединение машин включено только там, где действует протокол занятия
+ * машины. Нарушение — ошибка конфигурации: API и воркер не стартуют, чем
+ * молча работать с машинами, которые два планшета примут по частям.
+ */
+function assertMergeSitesWithinClaimSites(env: {
+  MACHINE_MERGE_SITES: string[];
+  GROUP_CLAIM_SITES: string[];
+}): void {
+  const claimAll = env.GROUP_CLAIM_SITES.includes('*');
+  if (claimAll) return;
+  const outside = env.MACHINE_MERGE_SITES.filter(
+    (site) => site === '*' || !env.GROUP_CLAIM_SITES.includes(site),
+  );
+  if (outside.length > 0) {
+    throw new Error(
+      `Invalid environment variables:\n  - MACHINE_MERGE_SITES: объекты ${outside.join(', ')} не входят в GROUP_CLAIM_SITES — объединение без защиты от двойной приёмки запрещено`,
+    );
+  }
 }

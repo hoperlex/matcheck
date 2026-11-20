@@ -205,6 +205,9 @@ export const sessions = pgTable('sessions', {
   lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
   lastSeenIp: varchar('last_seen_ip', { length: 64 }),
   lastSeenUa: text('last_seen_ua'),
+  // Заголовок X-Matcheck-Capabilities при последнем входе или обновлении
+  // токена (миграция 0155). NULL — клиент его не присылал.
+  lastSeenCapabilities: text('last_seen_capabilities'),
   invalidatedAt: timestamp('invalidated_at', { withTimezone: true }),
 });
 
@@ -2879,7 +2882,9 @@ export const operationGroupClaimEvents = pgTable(
     operationKind: text('operation_kind').notNull(),
     groupId: uuid('group_id').notNull(),
     operationId: uuid('operation_id'),
-    // 'create' | 'release' | 'reclaim'
+    // 'create' | 'release' | 'reclaim' | 'override'.
+    // override — менеджер на портале осознанно привязал документ занятой машины
+    // ко второй операции (allowSecondOperation); claim при этом не меняется.
     event: text('event').notNull(),
     actorUserId: uuid('actor_user_id').references(() => users.id, { onDelete: 'set null' }),
     reason: text('reason'),
@@ -2892,9 +2897,39 @@ export const operationGroupClaimEvents = pgTable(
     ),
     check(
       'operation_group_claim_events_event_check',
-      sql`${t.event} in ('create', 'release', 'reclaim')`,
+      sql`${t.event} in ('create', 'release', 'reclaim', 'override')`,
     ),
     index('operation_group_claim_events_group_idx').on(t.groupId, t.createdAt),
+  ],
+);
+
+// ─── Объединение машин ─────────────────────────────────────────────────────
+//
+// Отправка-участник → отправка-голова. Голова машины документа —
+// coalesce(target_root_id своего корня, сам корень). Документы не меняются;
+// объединение снимается удалением строк. Голова никогда не стоит в
+// member_root_id — инвариант держит machine-merge.ts под замком машины.
+// См. миграцию 0155_machine_merges.sql.
+export const machineMerges = pgTable(
+  'machine_merges',
+  {
+    memberRootId: uuid('member_root_id')
+      .primaryKey()
+      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+    targetRootId: uuid('target_root_id')
+      .notNull()
+      .references(() => sourceBundles.id, { onDelete: 'cascade' }),
+    // Операция «Объединить», которой участник попал в машину: отмена снимает
+    // объединение, только если состав создан именно ею.
+    mergeId: uuid('merge_id').notNull(),
+    mergedByUserId: uuid('merged_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    mergedAt: timestamp('merged_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('machine_merges_not_self_check', sql`${t.memberRootId} <> ${t.targetRootId}`),
+    index('machine_merges_target_idx').on(t.targetRootId),
   ],
 );
 

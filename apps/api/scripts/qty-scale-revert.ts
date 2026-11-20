@@ -34,6 +34,7 @@ import { db } from '../src/db/client.js';
 import { photoRecognizedItems, sourceDocumentItems, sourceDocuments } from '../src/db/schema.js';
 import { operationTrace } from '../src/domain/sourceDocuments/operation-trace.js';
 import { markSourceDocumentContentChanged } from '../src/domain/sourceDocuments/document-group.js';
+import { lockMachineHead } from '../src/domain/sourceDocuments/machine-lock.js';
 import { mergePersistentUpdWarnings, validateUpdTotals } from '../src/domain/edo/upd-validation.js';
 import { deriveUpdParseOutcome } from '../src/domain/edo/upd-outcome.js';
 import type { QtyScaleEntry, QtyScaleKind, QtyScaleTrace } from '../src/domain/edo/qty-scale.js';
@@ -82,6 +83,8 @@ async function revertDocuments(): Promise<{ reverted: number; skips: Skip[] }> {
   for (const { id } of rows) {
     await db.transaction(async (tx) => {
       const txDb = tx as unknown as typeof db;
+      // Замок машины — первым действием, до записи документа (machine-lock.ts).
+      const machine = await lockMachineHead(txDb, { documentId: id });
       // Шапку берём под блокировкой: между выборкой выше и этой транзакцией
       // документ мог переразобраться.
       const [sd] = await txDb
@@ -202,7 +205,7 @@ async function revertDocuments(): Promise<{ reverted: number; skips: Skip[] }> {
       }
       await txDb.update(sourceDocuments).set(header).where(eq(sourceDocuments.id, id));
       // Количество изменилось — планшет обязан забрать документ заново.
-      await markSourceDocumentContentChanged(txDb, id);
+      await markSourceDocumentContentChanged(txDb, machine, id);
     });
   }
 

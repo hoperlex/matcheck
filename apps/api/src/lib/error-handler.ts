@@ -1,6 +1,6 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 import { loadEnv } from './env.js';
-import { HttpError } from './http-error.js';
+import { BusyRetryError, HttpError } from './http-error.js';
 
 const env = loadEnv();
 
@@ -52,11 +52,14 @@ export function errorHandler(err: FastifyError, req: FastifyRequest, reply: Fast
   const fromError = err instanceof HttpError ? err.statusCode : null;
   const status = fromReply ?? fromError ?? 500;
   reply.code(status);
+  if (err instanceof BusyRetryError) reply.header('Retry-After', String(err.retryAfterSeconds));
   const error = err as Error & { code?: string };
   // Детали 5xx наружу не отдаём — в них попадает текст SQL с параметрами.
   // Сообщения HttpError — часть контракта («Некорректная дата в arrivedTo»),
   // их отдаём всегда.
-  const hideDetails = status >= 500 && env.NODE_ENV === 'production';
+  // Текст временного отказа — наш, без SQL: его показывает портал.
+  const hideDetails =
+    status >= 500 && env.NODE_ENV === 'production' && !(err instanceof BusyRetryError);
   // `details` отдаём только у НАШИХ 4xx. Два ограничения, и оба намеренные:
   // произвольная ошибка с уже выставленным 4xx (например, из библиотеки) могла
   // бы принести наружу внутренние данные, а у 5xx подробности закрыты всегда —

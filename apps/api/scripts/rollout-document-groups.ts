@@ -83,6 +83,16 @@ function argValue(flag: string): string | null {
 }
 
 async function main(): Promise<void> {
+  // Скрипт поднимает ревизию по одному корневому пакету и бампает документы
+  // только этого корня. У объединённой машины (machine_merges) ревизия живёт на
+  // голове, и такой подъём развёл бы ревизии внутри машины. Сначала снять
+  // объединения: scripts/machine-merges-retire.ts.
+  const merged = await db.execute<{ n: number }>(drSql`select count(*)::int as n from machine_merges`);
+  if (([...merged][0]?.n ?? 0) > 0) {
+    throw new Error(
+      'machine_merges не пуста — сначала снимите объединения (scripts/machine-merges-retire.ts --apply)',
+    );
+  }
   const apply = hasFlag('--apply');
   const siteFilter = argValue('--site');
   const site = siteFilter

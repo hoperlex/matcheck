@@ -24,6 +24,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { publishGroupDocuments } from '../../src/domain/sourceDocuments/document-group.js';
+import { lockMachineHead } from '../../src/domain/sourceDocuments/machine-lock.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
@@ -97,7 +98,14 @@ suite('публикация сборки: вся машина доезжает �
     expect(versionBefore.get(waybillId)).toBe(1);
 
     const now = new Date();
-    await publishGroupDocuments(db, rootBundleId, [segmentAId, segmentBId], now);
+    await db.transaction(async (tx) =>
+      publishGroupDocuments(
+        tx,
+        await lockMachineHead(tx as never, { bundleId: rootBundleId }),
+        [segmentAId, segmentBId],
+        now,
+      ),
+    );
     // Публикация переводит корень в logical_v1 — после этого group_id считается.
     await sql`UPDATE source_bundles
                  SET assembly_version = 'logical_v1', published_generation = 0

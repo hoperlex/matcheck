@@ -21,7 +21,7 @@ import { ingestEvents, sourceBundles, sourceDocuments } from '../../db/schema.js
 import { STUB_ERROR_CODES } from '@matcheck/contracts';
 import { groupModeSites } from '../groups/group-mode.js';
 import { assemblyServedRowSql } from './bundle-import-registry.js';
-import { machineRootSql } from './document-group.js';
+import { machineHeadOfRootSql, machineRootRowsSql, machineRootSql } from './document-group.js';
 import { loadEnv } from '../../lib/env.js';
 
 /**
@@ -131,8 +131,13 @@ function groupIsCompleteSql(): SQL {
   not exists (
     select 1
       from ${sourceBundles} self
-      join ${sourceBundles} root on root.id = coalesce(self.parent_bundle_id, self.id)
-      join ${sourceBundles} member on coalesce(member.parent_bundle_id, member.id) = root.id
+      -- root — ГОЛОВА машины: у объединённой машины соседи живут в пакетах
+      -- всех её отправок, и машина едет на планшет только целиком.
+      join ${sourceBundles} root
+        on root.id = ${machineHeadOfRootSql(sql.raw('coalesce(self.parent_bundle_id, self.id)'))}
+      cross join lateral ${machineRootRowsSql(sql.raw('root.id'))} mr
+      -- Буквальное равенство — под него построен source_bundles_root_idx (0154).
+      join ${sourceBundles} member on coalesce(member.parent_bundle_id, member.id) = mr.rid
       left join ${sourceDocuments} sibling
              on sibling.bundle_id = member.id
             and sibling.is_technical = false
@@ -213,7 +218,12 @@ const PORTAL_PACKAGE_IS_PUBLISHED = sql`
   not exists (
     select 1
       from ${sourceBundles} pb
-      join ${sourceBundles} proot on proot.id = coalesce(pb.parent_bundle_id, pb.id)
+      -- Все отправки машины: у объединённой машины неопубликованная сборка
+      -- любой из них держит всю машину, иначе на планшет уедет половина.
+      cross join lateral ${machineRootRowsSql(
+        machineHeadOfRootSql(sql.raw('coalesce(pb.parent_bundle_id, pb.id)')),
+      )} mr
+      join ${sourceBundles} proot on proot.id = mr.rid
      where pb.id = ${sourceDocuments.bundleId}
        and exists (
          select 1 from ${ingestEvents} ie

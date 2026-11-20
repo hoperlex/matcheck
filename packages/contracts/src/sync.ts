@@ -50,6 +50,11 @@ export const SyncDeltaResponseSchema = z.object({
   // используются как whitelist при добавлении строк материалов.
   units: z.array(UnitSchema),
   deletedIds: SyncDeletedIdsSchema,
+  // Почему документ из deletedIds.sourceDocuments ушёл из выдачи: 'deleted' —
+  // удалён (entity_deletions), 'hidden' — скрыт меткой видимости и может
+  // вернуться (переразбор, неполная машина, перенос объекта). Аддитивно:
+  // старые сборки поле игнорируют, deletedIds прежний.
+  deletedReasons: z.object({ sourceDocuments: z.record(z.enum(['deleted', 'hidden'])) }).optional(),
   serverNow: z.string(),
 });
 export type SyncDeltaResponse = z.infer<typeof SyncDeltaResponseSchema>;

@@ -48,3 +48,20 @@ export class RateLimitError extends HttpError {
     this.name = 'rate_limit_exceeded';
   }
 }
+
+/**
+ * Временный отказ: транзакция не прошла из-за взаимной блокировки или смены
+ * состава машины, повторы исчерпаны. Именно 503, а не 409: мобильный
+ * MutationProcessor на 5xx повторяет мутацию позже, а неизвестный 409
+ * замораживает её с conflictPending и блокирует очередь сущности. Заголовок
+ * Retry-After ставит errorHandler.
+ */
+export class BusyRetryError extends HttpError {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds = 5) {
+    super(503, 'Сервер занят этой машиной — повторите через минуту');
+    this.name = 'busy_retry';
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}

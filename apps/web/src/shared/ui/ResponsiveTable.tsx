@@ -117,6 +117,10 @@ function wrapRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
   };
 }
 
+// Строки групп (скобка «−/+», shared/ui/groupRows.ts) номера не получают и в
+// счёт не входят: «№» — это номер документа или операции, а не строки.
+const isGroupRow = (it: unknown): boolean => (it as { kind?: unknown }).kind === 'group';
+
 export function ResponsiveTable<T extends object>({
   items,
   columns,
@@ -263,7 +267,12 @@ export function ResponsiveTable<T extends object>({
     typeof rowKey === 'function' ? String(rowKey(it)) : String(it[rowKey] as unknown);
   const originalIndex = useMemo(() => {
     const m = new Map<string, number>();
-    items.forEach((it, i) => m.set(getRowKey(it), i));
+    let n = 0;
+    items.forEach((it) => {
+      if (isGroupRow(it)) return;
+      m.set(getRowKey(it), n);
+      n += 1;
+    });
     return m;
     // getRowKey зависит от rowKey-пропа, items — стабильный массив здесь.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -296,7 +305,9 @@ export function ResponsiveTable<T extends object>({
           // При server-side pagination передаётся numberedOffset = (page-1)*pageSize
           // — тогда на странице 2 первая строка получит номер 51, не 1.
           render: (_: unknown, record: T) =>
-            (numberedOffset ?? 0) + (originalIndex.get(getRowKey(record)) ?? -1) + 1,
+            isGroupRow(record)
+              ? null
+              : (numberedOffset ?? 0) + (originalIndex.get(getRowKey(record)) ?? -1) + 1,
         },
         ...tools.columns.map(decorate),
       ]
@@ -435,10 +446,10 @@ export function ResponsiveTable<T extends object>({
           className={rowClassName?.(item) || undefined}
           style={onRowClick ? { cursor: 'pointer' } : undefined}
         >
-          {numbered ? (
+          {numbered && !isGroupRow(item) ? (
             <Space align="start" style={{ width: '100%' }}>
               <Typography.Text type="secondary" style={{ minWidth: 24 }}>
-                {(numberedOffset ?? 0) + idx + 1}.
+                {(numberedOffset ?? 0) + (originalIndex.get(getRowKey(item)) ?? idx) + 1}.
               </Typography.Text>
               <div style={{ flex: 1, minWidth: 0 }}>{cardRender(item)}</div>
             </Space>

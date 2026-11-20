@@ -15,6 +15,43 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { sourceBundles, sourceDocuments } from '../../db/schema.js';
 import { loadEnv } from '../../lib/env.js';
+import type { MachineHeadLock } from './machine-lock.js';
+
+// ─── Голова машины ───────────────────────────────────────────────────────────
+//
+// Машина — это отправка с /uploads, а после «Объединить в одну машину» —
+// несколько отправок (machine_merges: участник → голова). Идентификатор машины
+// для планшета и портала — ГОЛОВА: coalesce(target_root_id своего корня, сам
+// корень). У необъединённой машины голова — её корень, ровно как раньше, так
+// что при пустой machine_merges все фрагменты ниже дают прежний результат.
+//
+// Соединение с пакетами машины пишется буквально
+// `coalesce(<алиас>.parent_bundle_id, <алиас>.id) = <id корня>`: под это
+// выражение построен индекс source_bundles_root_idx (миграция 0154), другая
+// форма его не использует.
+
+/** Голова машины по выражению корня загрузки. */
+export function machineHeadOfRootSql(rootExpr: SQL): SQL<string> {
+  return sql<string>`coalesce(
+    (select mm.target_root_id from machine_merges mm where mm.member_root_id = ${rootExpr}),
+    ${rootExpr}
+  )`;
+}
+
+/**
+ * Корни машины головы `headExpr` — она сама и её участники, — строками `rid`.
+ * Для `join lateral (...) mr on true` перед соединением пакетов по равенству.
+ */
+export function machineRootRowsSql(headExpr: SQL): SQL {
+  return sql`(
+    select ${headExpr} as rid
+    union all
+    select mm.member_root_id as rid from machine_merges mm where mm.target_root_id = ${headExpr}
+  )`;
+}
+
+/** Выражение корня загрузки пакета `alias` (строка из нашего кода). */
+const rootOf = (alias: string): SQL => sql.raw(`coalesce(${alias}.parent_bundle_id, ${alias}.id)`);
 
 /**
  * Сборка, при которой группу вообще можно склеивать.
@@ -34,7 +71,7 @@ import { loadEnv } from '../../lib/env.js';
 const GROUPABLE_ASSEMBLY = 'logical_v1';
 
 /** Алиасы, под которыми корневой пакет доступен в местах вызова. */
-type RootAlias = 'root' | 'sb' | 'member_root';
+type RootAlias = 'root' | 'sb' | 'member_root' | 'head';
 
 /**
  * «Этот корневой пакет — машина», единственное правило на все точки.
@@ -99,9 +136,9 @@ export function machineRootSql(alias: RootAlias = 'root'): SQL {
  */
 export function documentGroupIdSql(): SQL<string | null> {
   return sql<string | null>`(
-  select case when ${machineRootSql('root')} then root.id end
+  select case when ${machineRootSql('head')} then head.id end
     from ${sourceBundles} b
-    join ${sourceBundles} root on root.id = coalesce(b.parent_bundle_id, b.id)
+    join ${sourceBundles} head on head.id = ${machineHeadOfRootSql(rootOf('b'))}
    where b.id = ${sourceDocuments.bundleId}
 )`;
 }
@@ -128,12 +165,12 @@ export const portalDocumentGroupIdSql = sql<string | null>`(
   select case
            when exists (
              select 1 from ingest_events ie
-              where ie.bundle_id = root.id and ie.channel = 'public'
+              where ie.bundle_id = head.id and ie.channel = 'public'
            )
-           then root.id
+           then head.id
          end
     from ${sourceBundles} b
-    join ${sourceBundles} root on root.id = coalesce(b.parent_bundle_id, b.id)
+    join ${sourceBundles} head on head.id = ${machineHeadOfRootSql(rootOf('b'))}
    where b.id = ${sourceDocuments.bundleId}
 )`;
 
@@ -152,18 +189,18 @@ export const portalDocumentGroupSizeSql = sql<number | null>`(
   select case
            when exists (
              select 1 from ingest_events ie
-              where ie.bundle_id = root.id and ie.channel = 'public'
+              where ie.bundle_id = head.id and ie.channel = 'public'
            )
            then (
              select count(*)::int
-               from ${sourceDocuments} member
-               join ${sourceBundles} mb on mb.id = member.bundle_id
-              where coalesce(mb.parent_bundle_id, mb.id) = root.id
-                and member.is_technical = false
+               from ${machineRootRowsSql(sql.raw('head.id'))} mr
+               join ${sourceBundles} mb on coalesce(mb.parent_bundle_id, mb.id) = mr.rid
+               join ${sourceDocuments} member on member.bundle_id = mb.id
+              where member.is_technical = false
            )
          end
     from ${sourceBundles} b
-    join ${sourceBundles} root on root.id = coalesce(b.parent_bundle_id, b.id)
+    join ${sourceBundles} head on head.id = ${machineHeadOfRootSql(rootOf('b'))}
    where b.id = ${sourceDocuments.bundleId}
 )`;
 
@@ -179,10 +216,13 @@ export const portalDocumentGroupSizeSql = sql<number | null>`(
  * Функция по той же причине, что и documentGroupIdSql: правило под рубильником.
  */
 export function documentGroupRevisionSql(): SQL<number | null> {
+  // Ревизия живёт на ГОЛОВЕ: все, кто её поднимает, держат замок головы
+  // (machine-lock.ts). Сумма по корням отвергнута ревью: при разъединении она
+  // требовала бы «S + 1» всем корням и росла бы экспоненциально.
   return sql<number | null>`(
-  select case when ${machineRootSql('root')} then root.group_revision end
+  select case when ${machineRootSql('head')} then head.group_revision end
     from ${sourceBundles} b
-    join ${sourceBundles} root on root.id = coalesce(b.parent_bundle_id, b.id)
+    join ${sourceBundles} head on head.id = ${machineHeadOfRootSql(rootOf('b'))}
    where b.id = ${sourceDocuments.bundleId}
 )`;
 }
@@ -206,11 +246,16 @@ export function documentGroupRevisionSql(): SQL<number | null> {
  * no-op.
  *
  * Вызывать ВНУТРИ транзакции публикации.
+ *
+ * ЗАМОК МАШИНЫ ОБЯЗАТЕЛЕН (параметр `machine`): транзакция берёт
+ * lockMachineHead ПЕРВЫМ действием, до записи своих документов. Бамп трогает
+ * документы всех отправок машины, и без общего замка две транзакции, каждая
+ * со своим документом, ждали бы друг друга (см. machine-lock.ts).
  */
 export async function publishGroupDocuments(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx: any,
-  rootId: string,
+  machine: MachineHeadLock,
   segmentDocIds: string[],
   now: Date,
 ): Promise<void> {
@@ -224,6 +269,9 @@ export async function publishGroupDocuments(
         sql`, `,
       )})`
     : sql`false`;
+  // Документы ВСЕЙ машины, а не только своего корня: у объединённой машины
+  // публикация сборки одной отправки открывает и документы головы — без бампа
+  // дельта /sync их не привезла бы, и машина приехала бы на планшет половиной.
   // ISO-строкой с явным кастом, а не объектом Date: в сыром sql-шаблоне drizzle
   // Date не сериализует и падает на «argument must be of type string».
   await tx.execute(sql`
@@ -235,7 +283,12 @@ export async function publishGroupDocuments(
      where b.id = sd.bundle_id
        and (
          ${idList}
-         or (sd.is_technical = false and coalesce(b.parent_bundle_id, b.id) = ${rootId})
+         or (
+           sd.is_technical = false
+           and coalesce(b.parent_bundle_id, b.id) in (
+             select mr.rid from ${machineRootRowsSql(sql`${machine.headId}::uuid`)} mr
+           )
+         )
        )
   `);
 }
@@ -265,34 +318,38 @@ export async function publishGroupDocuments(
  *
  * Вызывать ВНУТРИ той же транзакции, что и само изменение, — иначе планшет
  * может успеть забрать документ до бампа и не узнать о правке.
+ *
+ * ЗАМОК МАШИНЫ ОБЯЗАТЕЛЕН (параметр `machine`): транзакция берёт
+ * lockMachineHead ПЕРВЫМ действием, до записи своих документов. Бамп трогает
+ * документы всех отправок машины, и без общего замка две транзакции, каждая
+ * со своим документом, ждали бы друг друга (см. machine-lock.ts).
  */
 export async function bumpGroupRevision(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx: any,
-  sourceDocumentId: string,
+  machine: MachineHeadLock,
 ): Promise<void> {
+  if (!machine.headId) return;
   await tx.execute(sql`
-    with root as (
-      select coalesce(b.parent_bundle_id, b.id) as id
-        from ${sourceDocuments} sd
-        join ${sourceBundles} b on b.id = sd.bundle_id
-       where sd.id = ${sourceDocumentId}
-    ),
-    bumped as (
+    with bumped as (
       update ${sourceBundles} sb
          set group_revision = sb.group_revision + 1,
              updated_at = statement_timestamp()
-        from root
-       where sb.id = root.id
+       where sb.id = ${machine.headId}::uuid
          and ${machineRootSql('sb')}
       returning sb.id
+    ),
+    machine_roots as (
+      select bumped.id as rid from bumped
+      union all
+      select mm.member_root_id from machine_merges mm join bumped on mm.target_root_id = bumped.id
     )
     update ${sourceDocuments} sd
        set updated_at = statement_timestamp(),
            version = sd.version + 1
-      from ${sourceBundles} b, bumped
+      from ${sourceBundles} b
      where b.id = sd.bundle_id
-       and coalesce(b.parent_bundle_id, b.id) = bumped.id
+       and coalesce(b.parent_bundle_id, b.id) in (select rid from machine_roots)
        and sd.is_technical = false
   `);
 }
@@ -332,27 +389,31 @@ export async function bumpGroupRevision(
  * после того, как запись подтвердилась: устаревшее поколение обязано отломиться
  * раньше (StaleGenerationError), иначе оно добавит свой инкремент поверх уже
  * актуальной версии.
+ *
+ * ЗАМОК МАШИНЫ ОБЯЗАТЕЛЕН (параметр `machine`): транзакция берёт
+ * lockMachineHead ПЕРВЫМ действием, до записи своих документов. Бамп трогает
+ * документы всех отправок машины, и без общего замка две транзакции, каждая
+ * со своим документом, ждали бы друг друга (см. machine-lock.ts).
  */
 export async function markSourceDocumentContentChanged(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx: any,
+  machine: MachineHeadLock,
   sourceDocumentId: string,
 ): Promise<void> {
   await tx.execute(sql`
-    with root as (
-      select coalesce(b.parent_bundle_id, b.id) as id
-        from ${sourceDocuments} sd
-        join ${sourceBundles} b on b.id = sd.bundle_id
-       where sd.id = ${sourceDocumentId}
-    ),
-    bumped as (
+    with bumped as (
       update ${sourceBundles} sb
          set group_revision = sb.group_revision + 1,
              updated_at = statement_timestamp()
-        from root
-       where sb.id = root.id
+       where sb.id = ${machine.headId ?? null}::uuid
          and ${machineRootSql('sb')}
       returning sb.id
+    ),
+    machine_roots as (
+      select bumped.id as rid from bumped
+      union all
+      select mm.member_root_id from machine_merges mm join bumped on mm.target_root_id = bumped.id
     )
     update ${sourceDocuments} sd
        set updated_at = statement_timestamp(),
@@ -364,7 +425,7 @@ export async function markSourceDocumentContentChanged(
            select 1
              from ${sourceBundles} b
             where b.id = sd.bundle_id
-              and coalesce(b.parent_bundle_id, b.id) in (select id from bumped)
+              and coalesce(b.parent_bundle_id, b.id) in (select rid from machine_roots)
          )
        )
   `);

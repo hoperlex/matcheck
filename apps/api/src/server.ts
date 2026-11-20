@@ -35,6 +35,7 @@ import { estimatRoutes } from './routes/estimat.js';
 import { supplierContractsRoutes } from './routes/supplier-contracts.js';
 import { assetRoutes } from './routes/assets.js';
 import { sourceDocumentRoutes } from './routes/source-documents.js';
+import { machineMergeRoutes } from './routes/source-document-machine-merge.js';
 import { deliveryRoutes } from './routes/deliveries.js';
 import { shipmentRoutes } from './routes/shipments.js';
 import { reportRoutes } from './routes/reports.js';
@@ -136,6 +137,7 @@ export async function buildServer() {
   await app.register(supplierContractsRoutes);
   await app.register(assetRoutes);
   await app.register(sourceDocumentRoutes);
+  await app.register(machineMergeRoutes);
   await app.register(deliveryRoutes);
   await app.register(shipmentRoutes);
   await app.register(reportRoutes);

@@ -37,6 +37,7 @@ import {
   bumpGroupRevision,
   markSourceDocumentContentChanged,
 } from '../../src/domain/sourceDocuments/document-group.js';
+import { lockMachineHead } from '../../src/domain/sourceDocuments/machine-lock.js';
 import type { AuthUser } from '../../src/plugins/auth.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -166,19 +167,25 @@ suite('фиксация замены содержимого документа (
 
   it('одиночный УПД: версия растёт, хотя машины у документа нет', async () => {
     const before = await versionOf(soloUpdId);
-    await markSourceDocumentContentChanged(db, soloUpdId);
+    await db.transaction(async (tx) =>
+      markSourceDocumentContentChanged(tx, await lockMachineHead(tx as never, { documentId: soloUpdId }), soloUpdId),
+    );
     expect(await versionOf(soloUpdId)).toBe(before + 1);
   });
 
   it('одиночная накладная: версия растёт — путь waybill_single бампа не звал вовсе', async () => {
     const before = await versionOf(soloWaybillId);
-    await markSourceDocumentContentChanged(db, soloWaybillId);
+    await db.transaction(async (tx) =>
+      markSourceDocumentContentChanged(tx, await lockMachineHead(tx as never, { documentId: soloWaybillId }), soloWaybillId),
+    );
     expect(await versionOf(soloWaybillId)).toBe(before + 1);
   });
 
   it('соседа по НЕ-машине не трогаем: legacy-пакет машиной не является', async () => {
     const neighbourBefore = await versionOf(soloWaybillId);
-    await markSourceDocumentContentChanged(db, soloUpdId);
+    await db.transaction(async (tx) =>
+      markSourceDocumentContentChanged(tx, await lockMachineHead(tx as never, { documentId: soloUpdId }), soloUpdId),
+    );
     expect(await versionOf(soloWaybillId)).toBe(neighbourBefore);
   });
 
@@ -188,7 +195,9 @@ suite('фиксация замены содержимого документа (
     const waybillBefore = await versionOf(machineWaybillId);
     const revisionBefore = await groupRevisionOf(rootBundleId);
 
-    await markSourceDocumentContentChanged(db, machineUpdId);
+    await db.transaction(async (tx) =>
+      markSourceDocumentContentChanged(tx, await lockMachineHead(tx as never, { documentId: machineUpdId }), machineUpdId),
+    );
 
     // Ключевая проверка: у изменённого документа +1, а не +2. Два отдельных
     // запроса («изменённому» и «всей машине») дали бы двойной инкремент.
@@ -204,13 +213,17 @@ suite('фиксация замены содержимого документа (
     // документа bundle_id равен NULL, и джойн выбросил бы его из UPDATE
     // молча — то есть повторил бы исходный дефект на другом пути.
     const before = await versionOf(looseDocId);
-    await markSourceDocumentContentChanged(db, looseDocId);
+    await db.transaction(async (tx) =>
+      markSourceDocumentContentChanged(tx, await lockMachineHead(tx as never, { documentId: looseDocId }), looseDocId),
+    );
     expect(await versionOf(looseDocId)).toBe(before + 1);
   });
 
   it('bumpGroupRevision на одиночном документе по-прежнему no-op — это и есть причина дефекта', async () => {
     const before = await versionOf(soloUpdId);
-    await bumpGroupRevision(db, soloUpdId);
+    await db.transaction(async (tx) =>
+      bumpGroupRevision(tx, await lockMachineHead(tx as never, { documentId: soloUpdId })),
+    );
     expect(await versionOf(soloUpdId)).toBe(before);
   });
 
@@ -244,7 +257,9 @@ suite('фиксация замены содержимого документа (
         .staleOnClient,
     ).toHaveLength(0);
 
-    await markSourceDocumentContentChanged(db, soloUpdId);
+    await db.transaction(async (tx) =>
+      markSourceDocumentContentChanged(tx, await lockMachineHead(tx as never, { documentId: soloUpdId }), soloUpdId),
+    );
 
     const after = await app.inject({
       method: 'POST',

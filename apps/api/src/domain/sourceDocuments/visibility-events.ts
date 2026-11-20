@@ -13,6 +13,8 @@
  */
 import { sql } from 'drizzle-orm';
 import { mobileVisibleSourceDocumentSql } from './mobile-visibility.js';
+import { machineRootRowsSql } from './document-group.js';
+import type { MachineHeadLock } from './machine-lock.js';
 
 /**
  * Записывает переходы видимости для документов, затронутых изменением.
@@ -31,9 +33,18 @@ import { mobileVisibleSourceDocumentSql } from './mobile-visibility.js';
 export async function recordVisibilityTransitions(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tx: any,
-  opts: { documentIds?: string[]; groupId?: string; reason: string },
+  opts: {
+    documentIds?: string[];
+    /**
+     * Охват — вся машина (голова и участники объединения). Требует замка
+     * машины: переходы пишутся по соседям, которых правят и другие транзакции.
+     */
+    machine?: MachineHeadLock;
+    reason: string;
+  },
 ): Promise<void> {
-  const { documentIds, groupId, reason } = opts;
+  const { documentIds, reason } = opts;
+  const groupId = opts.machine?.headId ?? undefined;
   if (!documentIds?.length && !groupId) return;
 
   // Набор документов: явный список плюс, если задана группа, все её члены —
@@ -46,7 +57,9 @@ export async function recordVisibilityTransitions(
         select m.id
           from source_documents m
           join source_bundles mb on mb.id = m.bundle_id
-         where coalesce(mb.parent_bundle_id, mb.id) = ${groupId}
+         where coalesce(mb.parent_bundle_id, mb.id) in (
+           select mr.rid from ${machineRootRowsSql(sql`${groupId}::uuid`)} mr
+         )
       )${
         documentIds?.length
           ? sql` or source_documents.id in (${sql.join(

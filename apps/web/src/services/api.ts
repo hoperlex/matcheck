@@ -6,6 +6,7 @@ import type {
 } from '@matcheck/contracts';
 import { useAuthStore } from '../stores/auth';
 import { refreshAccessToken } from './authRefresh';
+import { CAPABILITIES_HEADER, PORTAL_CAPABILITIES } from './clientCapabilities';
 
 export class ApiError extends Error {
   constructor(
@@ -82,6 +83,7 @@ async function request<T>(
   }
   const token = useAuthStore.getState().accessToken;
   if (token) headers.set('Authorization', `Bearer ${token}`);
+  headers.set(CAPABILITIES_HEADER, PORTAL_CAPABILITIES);
 
   // Таймаут запроса: собственный AbortController, объединённый с внешним signal
   // (если вызывающий передал свой для отмены). budget=null → без таймаута

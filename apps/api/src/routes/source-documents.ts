@@ -74,6 +74,7 @@ import {
   bumpGroupRevision,
   documentGroupIdSql,
   documentGroupRevisionSql,
+  machineHeadOfRootSql,
   portalDocumentGroupIdSql,
   portalDocumentGroupSizeSql,
 } from '../domain/sourceDocuments/document-group.js';
@@ -88,9 +89,16 @@ import {
   type SiteTransferConflict,
 } from '../domain/sourceDocuments/site-transfer.js';
 import {
+  machineDocumentIdsOf,
+  machineSummaries,
+  type MachineSummary,
+} from '../domain/sourceDocuments/machine-summary.js';
+import {
   lockMachine,
+  lockMachineHead,
   lockMachinesOrdered,
   resyncMachineBundleKeys,
+  type MachineHeadLock,
 } from '../domain/sourceDocuments/machine-lock.js';
 import {
   KEEP_REASON_MESSAGES,
@@ -393,6 +401,12 @@ type SdNames = {
   // Размер машины — сколько строк переедет вместе с документом при смене
   // объекта (см. transferSite).
   portalGroupSize?: number | null;
+  // Сводка машины для строки группы в списке (скобка «−/+»); только список.
+  machine?: MachineSummary | null;
+  // Объединённая вручную машина: сколько отправок и полный состав — только
+  // detail, для «Разъединить».
+  machineMergedUploads?: number | null;
+  machineDocumentIds?: string[];
   workHealth?: SourceWorkHealth;
 };
 
@@ -482,6 +496,13 @@ function sdRow(sd: typeof sourceDocuments.$inferSelect, names: SdNames = {}) {
     groupRevision: names.groupRevision ?? null,
     portalGroupId: names.portalGroupId ?? null,
     portalGroupSize: names.portalGroupSize ?? null,
+    ...(names.machine !== undefined ? { machine: names.machine } : {}),
+    ...(names.machineMergedUploads !== undefined
+      ? { machineMergedUploads: names.machineMergedUploads }
+      : {}),
+    ...(names.machineDocumentIds !== undefined
+      ? { machineDocumentIds: names.machineDocumentIds }
+      : {}),
   };
 }
 
@@ -681,30 +702,19 @@ async function loadSdNames(
   // Машина глазами менеджера. Detail-роут берёт эти поля своим select'ом, а
   // сюда они не попадали — и ответ PATCH возвращал карточке пустую машину, из-за
   // чего после сохранения исчезала подсказка «объект сменится у всей поставки».
+  // Те же фрагменты, что у detail: машина считается от головы объединения, и
+  // своя копия правила здесь разошлась бы с ними при первой же правке.
   const portalRows = sd.bundleId
-    ? await app.db.execute(drSql`
-        select case when portal.yes then root.id end as portal_group_id,
-               case
-                 when portal.yes then (
-                   select count(*)::int
-                     from source_documents member
-                     join source_bundles mb on mb.id = member.bundle_id
-                    where coalesce(mb.parent_bundle_id, mb.id) = root.id
-                      and member.is_technical = false
-                 )
-               end as portal_group_size
-          from source_bundles b
-          join source_bundles root on root.id = coalesce(b.parent_bundle_id, b.id)
-          cross join lateral (
-            select exists (
-              select 1 from ingest_events ie
-               where ie.bundle_id = root.id and ie.channel = 'public'
-            ) as yes
-          ) portal
-         where b.id = ${sd.bundleId}::uuid
-      `)
+    ? await app.db
+        .select({
+          portal_group_id: portalDocumentGroupIdSql,
+          portal_group_size: portalDocumentGroupSizeSql,
+        })
+        .from(sourceDocuments)
+        .where(eq(sourceDocuments.id, sd.id))
+        .limit(1)
     : [];
-  const portal = [...portalRows][0] as
+  const portal = portalRows[0] as
     | { portal_group_id: string | null; portal_group_size: number | null }
     | undefined;
 
@@ -898,13 +908,14 @@ async function loadDuplicateTrail(
 // llm_calls удаляются каскадно по FK. Возвращает S3-ключи: ставить их в очередь
 // чистки вызывающий обязан ПОСЛЕ коммита.
 //
-// Блокировок здесь нет — порядок задаёт вызывающий. Разрешение дубликата
-// вызывает это под уже захваченной машиной (lockMachine), прочие пути — как и
-// раньше, без захвата.
+// Блокировок здесь нет — порядок задаёт вызывающий: замок машины (`machine`)
+// он берёт ПЕРВЫМ действием транзакции. Разрешение дубликата передаёт замок из
+// lockMachinesOrdered, одиночное и массовое удаление — из lockMachineHead.
 async function deleteSourceDocumentTx(
   tx: Db,
   id: string,
   deletedByUserId: string | null,
+  machine: MachineHeadLock,
 ): Promise<{ s3Keys: string[] }> {
   const refs = await countDocumentReferences(tx, id);
   if (refs.deliveries > 0 || refs.shipments > 0) {
@@ -922,17 +933,6 @@ async function deleteSourceDocumentTx(
     .from(sourceDocuments)
     .where(eq(sourceDocuments.id, id))
     .limit(1);
-  // Корень машины забираем ДО удаления: после него связь документа с пакетом
-  // пропадает, и оповестить соседей будет не по чему.
-  const [machine] = await tx
-    .select({
-      rootId: drSql<string>`coalesce(${sourceBundles.parentBundleId}, ${sourceBundles.id})`,
-    })
-    .from(sourceDocuments)
-    .innerJoin(sourceBundles, eq(sourceBundles.id, sourceDocuments.bundleId))
-    .where(eq(sourceDocuments.id, id))
-    .limit(1);
-
   const rollout = loadEnv().GROUPS_ROLLOUT;
   // Журнал hard-delete + физическое удаление одной транзакцией:
   // офлайн-клиент узнаёт об удалении через /sync.deletedIds.
@@ -951,7 +951,7 @@ async function deleteSourceDocumentTx(
   // заново, и если у него открыта форма по этой машине, он получит диалог
   // «состав машины изменился». До выката новой модели интерфейс инспектора не
   // должен меняться вообще.
-  if (rollout) await bumpGroupRevision(tx, id);
+  if (rollout) await bumpGroupRevision(tx, machine);
   // Закрываем строку реестра ДО удаления документа, в той же транзакции.
   // Иначе проверка «у каждого принятого файла есть документ» увидит файл без
   // документа и заведёт заглушку заново — причём призраком: ключи этого
@@ -965,9 +965,9 @@ async function deleteSourceDocumentTx(
   //
   // Скоуп по машине, а не по удалённому документу: гаснет или, наоборот,
   // открывается именно СОСЕД — удалённого в выборке уже нет.
-  if (rollout && machine?.rootId) {
+  if (rollout && machine.headId) {
     await recordVisibilityTransitions(tx, {
-      groupId: machine.rootId,
+      machine,
       reason: 'документ удалён менеджером',
     });
   }
@@ -1005,14 +1005,34 @@ async function deleteUpdWithRefsCheck(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   log?: { warn: (...args: any[]) => void },
 ): Promise<void> {
-  const { s3Keys } = await app.db.transaction((tx: Db) =>
-    deleteSourceDocumentTx(tx, id, deletedByUserId),
+  const { s3Keys } = await app.db.transaction(async (tx: Db) =>
+    deleteSourceDocumentTx(tx, id, deletedByUserId, await lockMachineHead(tx, { documentId: id })),
   );
   await enqueueS3Cleanup(app, id, s3Keys, log);
 }
 
 export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<void> {
   const app = asZod(rawApp);
+
+  /**
+   * Объединённая вручную машина — для карточки на портале: сколько отправок и
+   * полный состав (его «Разъединить» шлёт как expectedDocumentIds). Планшету
+   * не отдаём: ему это не нужно, а ответ detail он кэширует.
+   */
+  async function machineMergeFields(
+    portalGroupId: string | null | undefined,
+    role: string | undefined,
+  ): Promise<{ machineMergedUploads?: number | null; machineDocumentIds?: string[] }> {
+    if (!portalGroupId || role === 'inspector_kpp') return {};
+    const summary = (await machineSummaries(app.db as unknown as Db, [portalGroupId])).get(
+      portalGroupId,
+    );
+    if (!summary || summary.uploadCount <= 1) return { machineMergedUploads: null };
+    return {
+      machineMergedUploads: summary.uploadCount,
+      machineDocumentIds: await machineDocumentIdsOf(app.db as unknown as Db, portalGroupId),
+    };
+  }
   app.get(
     '/api/v1/source-documents',
     {
@@ -1169,7 +1189,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
               // Поставка — корневой пакет загрузки. Документ без пакета (таких
               // ~190 из исторических и XML-загрузок) сам себе поставка, иначе
               // все они слиплись бы в одну гигантскую группу.
-              groupId: drSql<string>`coalesce(${rootBundle.id}::text, ${sourceDocuments.id}::text)`,
+              // Объединённая машина — одна поставка: ключ — её голова.
+              groupId: drSql<string>`coalesce((${machineHeadOfRootSql(drSql`${rootBundle.id}`)})::text, ${sourceDocuments.id}::text)`,
             })
             .from(sourceDocuments)
             .leftJoin(docBundle, eq(docBundle.id, sourceDocuments.bundleId))
@@ -1193,7 +1214,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           const pendingSkeleton = pendingAllowed
             ? await tx.execute<{ item_id: string; group_id: string }>(drSql`
                 select bi.id::text as item_id,
-                       coalesce(b.parent_bundle_id, b.id)::text as group_id
+                       (${machineHeadOfRootSql(drSql.raw('coalesce(b.parent_bundle_id, b.id)'))})::text as group_id
                   ${pendingFromSql}
                  order by bi.created_at desc, bi.id
               `)
@@ -1289,10 +1310,10 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                          bi.bundle_id,
                          case when exists (
                                 select 1 from ingest_events ie
-                                 where ie.bundle_id = coalesce(b.parent_bundle_id, b.id)
+                                 where ie.bundle_id = ${machineHeadOfRootSql(drSql.raw('coalesce(b.parent_bundle_id, b.id)'))}
                                    and ie.channel = 'public'
                               )
-                              then coalesce(b.parent_bundle_id, b.id)
+                              then ${machineHeadOfRootSql(drSql.raw('coalesce(b.parent_bundle_id, b.id)'))}
                          end as portal_group_id,
                          bi.source_filename as filename,
                          bi.mime_type,
@@ -1321,6 +1342,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         { isolationLevel: 'repeatable read' },
       );
       const { rows, count, pendingRows, pendingTotal, pageCount } = snapshot;
+      // Сводка машин страницы — одним запросом, по всей машине (не по фильтру).
+      const summaries = await machineSummaries(
+        app.db as unknown as Db,
+        rows.map((r) => r.portalGroupId).filter((id): id is string => !!id),
+      );
       return {
         items: await Promise.all(
           rows.map(async (r) => {
@@ -1340,6 +1366,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
               groupId: r.groupId,
               groupRevision: r.groupRevision,
               portalGroupId: r.portalGroupId,
+              machine: r.portalGroupId ? (summaries.get(r.portalGroupId) ?? null) : null,
               workHealth,
             });
           }),
@@ -1742,6 +1769,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         groupRevision: row.groupRevision,
         portalGroupId: row.portalGroupId,
         portalGroupSize: row.portalGroupSize,
+        ...(await machineMergeFields(row.portalGroupId, req.user?.role)),
         workHealth,
       });
 
@@ -3116,7 +3144,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
 
           if (action === 'skip') {
             // Удаляем загруженную копию (не существующий оригинал).
-            const { s3Keys } = await deleteSourceDocumentTx(tx, sd.id, userId);
+            const { s3Keys } = await deleteSourceDocumentTx(
+              tx,
+              sd.id,
+              userId,
+              locks.get(pre.id)!.head,
+            );
             return { kind: 'skip', s3Keys, siteId: sd.siteId };
           }
 
@@ -3163,7 +3196,11 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
                 .where(eq(sourceDocuments.id, existingId))
                 .limit(1);
               deletedExistingSiteId = ex?.siteId ?? null;
-              s3Keys = (await deleteSourceDocumentTx(tx, existingId, userId)).s3Keys;
+              // Оригинал существует (existingMissing = false), значит его
+              // машина захвачена lockMachinesOrdered выше вместе с копией.
+              const exLock = locks.get(existingId);
+              if (!exLock) throw new Error('машина оригинала не захвачена');
+              s3Keys = (await deleteSourceDocumentTx(tx, existingId, userId, exLock.head)).s3Keys;
             }
             await tx
               .update(sourceDocuments)
@@ -3232,7 +3269,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           // выше, порядок блокировок не нарушается) и переход видимости ПОСЛЕДНЕЙ
           // операцией транзакции (см. visibility-events).
           if (loadEnv().GROUPS_ROLLOUT) {
-            await bumpGroupRevision(tx, sd.id);
+            await bumpGroupRevision(tx, locks.get(pre.id)!.head);
             await recordVisibilityTransitions(tx, {
               documentIds: [sd.id],
               reason: 'копия оставлена как новая поставка',
@@ -4355,7 +4392,7 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
           // новой модели инспектор не должен видеть ни новых диалогов, ни
           // перезагрузки состава машины.
           if (inspectorSees && loadEnv().GROUPS_ROLLOUT) {
-            await bumpGroupRevision(tx, sd.id);
+            await bumpGroupRevision(tx, lock.head);
           }
           // Метки переноса — БЕЗ рубильника: снятие карточки с планшета прежнего
           // объекта не групповая механика, а базовая корректность выдачи. Без них
@@ -4377,14 +4414,17 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             // groupIsCompleteSql ВСЮ машину, и соседи без метки видимости
             // остались бы на планшете навсегда — дельта их больше не привозит,
             // а сверка лишнее не удаляет.
-            const machineScopeId = transfer.changed
-              ? transfer.rootBundleId
-              : dateTransfer.changed
-                ? dateTransfer.rootBundleId
+            // Машина та же, что захвачена lockMachine выше (её голова), —
+            // охват по ней, а не по корню своей отправки: у объединённой машины
+            // соседи живут и в других отправках.
+            const machineScope =
+              (transfer.changed && transfer.rootBundleId) ||
+              (dateTransfer.changed && dateTransfer.rootBundleId)
+                ? lock.head
                 : null;
             await recordVisibilityTransitions(tx, {
               documentIds: [sd.id],
-              ...(machineScopeId ? { groupId: machineScopeId } : {}),
+              ...(machineScope ? { machine: machineScope } : {}),
               reason: 'документ изменён менеджером',
             });
           }
@@ -4414,6 +4454,13 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         // занятость машины первым делом, поэтому коммит пустой транзакции
         // равнозначен откату, а остальные правки (реквизиты, позиции) не
         // применяются — менеджер не остаётся с «половиной сохранилось».
+        if (result.conflict.error === 'target_site_not_ready') {
+          return reply.code(409).send({
+            error: result.conflict.error,
+            message:
+              'Машина собрана из нескольких отправок, а на выбранном объекте объединение не включено — сначала разъедините её',
+          });
+        }
         const { deliveries: dCount, shipments: shCount } = result.conflict;
         const parts = [
           dCount > 0 ? `приёмок: ${dCount}` : null,

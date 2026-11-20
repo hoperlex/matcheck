@@ -28,6 +28,8 @@ export async function createSessionAndRefresh(
   userId: string,
   ip: string | undefined,
   userAgent: string | undefined,
+  /** Заголовок X-Matcheck-Capabilities — что умеет клиент (миграция 0155). */
+  capabilities?: string,
 ): Promise<IssueResult> {
   const token = generateOpaqueToken();
   const tokenHash = sha256Hex(token);
@@ -37,7 +39,12 @@ export async function createSessionAndRefresh(
 
   const [session] = await db
     .insert(sessions)
-    .values({ userId, lastSeenIp: ip, lastSeenUa: userAgent })
+    .values({
+      userId,
+      lastSeenIp: ip,
+      lastSeenUa: userAgent,
+      lastSeenCapabilities: capabilities ?? null,
+    })
     .returning();
   if (!session) throw new Error('Failed to create session');
 
@@ -75,6 +82,8 @@ export async function rotateRefreshToken(
   presentedToken: string,
   ip: string | undefined,
   userAgent: string | undefined,
+  /** Заголовок X-Matcheck-Capabilities — что умеет клиент (миграция 0155). */
+  capabilities?: string,
 ): Promise<RotateResult | null> {
   const tokenHash = sha256Hex(presentedToken);
 
@@ -120,7 +129,7 @@ export async function rotateRefreshToken(
     if (!current) return null;
 
     if (current.revokedAt) {
-      return tryReplay(tx, current, session.userId, presentedToken, ip, userAgent);
+      return tryReplay(tx, current, session.userId, presentedToken, ip, userAgent, capabilities);
     }
     if (current.expired) return null;
 
@@ -146,7 +155,7 @@ export async function rotateRefreshToken(
       // и идём тем же путём, что и обычный повтор.
       const after = await readTokenState(tx, current.id);
       if (!after) return null;
-      return tryReplay(tx, after, session.userId, presentedToken, ip, userAgent);
+      return tryReplay(tx, after, session.userId, presentedToken, ip, userAgent, capabilities);
     }
 
     const [newRow] = await tx
@@ -163,7 +172,7 @@ export async function rotateRefreshToken(
       .returning({ id: refreshTokens.id });
     if (!newRow) throw new Error('Failed to create refresh row');
 
-    await touchSession(tx, current.sessionId, ip, userAgent);
+    await touchSession(tx, current.sessionId, ip, userAgent, capabilities);
 
     await tx.insert(authEvents).values({
       userId: session.userId,
@@ -231,10 +240,16 @@ async function touchSession(
   sessionId: string,
   ip: string | undefined,
   userAgent: string | undefined,
+  capabilities?: string,
 ): Promise<void> {
   await tx
     .update(sessions)
-    .set({ lastSeenAt: new Date(), lastSeenIp: ip ?? null, lastSeenUa: userAgent ?? null })
+    .set({
+      lastSeenAt: new Date(),
+      lastSeenIp: ip ?? null,
+      lastSeenUa: userAgent ?? null,
+      lastSeenCapabilities: capabilities ?? null,
+    })
     .where(eq(sessions.id, sessionId));
 }
 
@@ -280,6 +295,7 @@ async function tryReplay(
   presentedToken: string,
   ip: string | undefined,
   userAgent: string | undefined,
+  capabilities?: string,
 ): Promise<RotateResult | null> {
   const graceSeconds = ENV.REFRESH_REUSE_GRACE_SECONDS;
   // Явная проверка нуля, а не сравнение возраста: у только что отозванного
@@ -317,7 +333,7 @@ async function tryReplay(
   // нечего, поведение прежнее.
   if (!derived) return killSession(tx, parent.sessionId, userId, ip, userAgent);
 
-  await touchSession(tx, parent.sessionId, ip, userAgent);
+  await touchSession(tx, parent.sessionId, ip, userAgent, capabilities);
   await tx.insert(authEvents).values({
     userId,
     event: 'refresh_grace_replay',

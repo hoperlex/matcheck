@@ -16,6 +16,7 @@ import {
   markSourceDocumentContentChanged,
   publishGroupDocuments,
 } from './domain/sourceDocuments/document-group.js';
+import { lockMachineHead } from './domain/sourceDocuments/machine-lock.js';
 import { recordVisibilityTransitions } from './domain/sourceDocuments/visibility-events.js';
 import { logger } from './lib/logger.js';
 import { installFatalHandlers } from './lib/fatal-visibility.js';
@@ -2773,6 +2774,11 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
   let segmentRepairQueued = false;
   await db.transaction(async (tx) => {
     const txDb = tx as unknown as typeof db;
+    // Замок машины — ПЕРВЫМ действием, до записи документа: ниже бампаются все
+    // документы машины, а их одновременно может писать портал или соседний
+    // разбор. Без общего замка каждый держал бы свой документ и ждал чужой
+    // (см. machine-lock.ts).
+    const machine = await lockMachineHead(txDb, { documentId: sourceDocumentId });
 
     // След документа в операциях проверяем ЗДЕСЬ, а не при решении о правке:
     // между решением и записью документ могли привязать к приёмке или
@@ -3148,7 +3154,7 @@ export async function handleJob(job: Job<UpdParseJobData>): Promise<void> {
     // Не bumpGroupRevision: он вырождается в no-op для пакета, машиной не
     // являющегося, и одиночный документ оставался с прежним version — сверка
     // такую копию не находила (52 документа на бою, см. helper).
-    await markSourceDocumentContentChanged(txDb, sourceDocumentId);
+    await markSourceDocumentContentChanged(txDb, machine, sourceDocumentId);
 
     // Разбор изменил статус и реквизиты, а значит мог изменить и видимость —
     // как самого документа, так и его соседей по машине: пока он был в
@@ -6762,6 +6768,10 @@ export async function tryFinalizeUpdAssembly(
   attempt?: { subBundleId: string; bundleGeneration: number },
 ): Promise<void> {
   const decision = await db.transaction(async (tx) => {
+    // Замок машины раньше строки своего корня: если отправка входит в
+    // объединённую машину, её голова — другой пакет, и порядок «голова →
+    // участники» общий для всех (machine-lock.ts).
+    const machine = await lockMachineHead(tx as unknown as typeof db, { bundleId: rootId });
     const [root] = await tx
       .select()
       .from(sourceBundles)
@@ -6939,7 +6949,7 @@ export async function tryFinalizeUpdAssembly(
     // Публикуем сегменты И бампаем сиблингов группы — иначе накладная, уже
     // видимая до публикации, навсегда осталась бы на планшете отдельной
     // карточкой. Подробнее — в KDoc publishGroupDocuments.
-    await publishGroupDocuments(tx, rootId, publishedDocIds, now);
+    await publishGroupDocuments(tx, machine, publishedDocIds, now);
     await tx
       .update(bundleSegments)
       .set({ publishedAt: now, updatedAt: now })
@@ -6954,13 +6964,22 @@ export async function tryFinalizeUpdAssembly(
         updatedAt: now,
       })
       .where(eq(sourceBundles.id, rootId));
+    // Ревизия машины живёт на голове. Отправка внутри объединённой машины —
+    // не голова: поднимаем ревизию головы, иначе планшет не заметит смены
+    // состава. Строка головы уже под нашим замком.
+    if (machine.headId && machine.headId !== rootId) {
+      await tx
+        .update(sourceBundles)
+        .set({ groupRevision: drSql`${sourceBundles.groupRevision} + 1`, updatedAt: now })
+        .where(eq(sourceBundles.id, machine.headId));
+    }
 
     // Публикация — момент, когда машина целиком становится видимой. Пишем
-    // переходы по ВСЕЙ группе, а не только по сегментам: накладная и М-15
+    // переходы по ВСЕЙ машине, а не только по сегментам: накладная и М-15
     // создаются на корневом пакете раньше публикации и до этой секунды были
     // скрыты вместе с недособранной машиной.
     await recordVisibilityTransitions(tx, {
-      groupId: rootId,
+      machine,
       reason: 'комплект машины опубликован',
     });
 
@@ -7909,6 +7928,10 @@ async function handleWaybillSingleReparseJob(
 
     await db.transaction(async (tx) => {
       const txDb = tx as unknown as typeof db;
+      // Замок машины первым действием: ниже бамп трогает всех соседей по
+      // машине, и без него этот путь с порталом или соседним разбором
+      // образовывал цикл «держу свой документ — жду чужой».
+      const machine = await lockMachineHead(txDb, { documentId: sourceDocumentId });
       const [saved] = await txDb
         .update(sourceDocuments)
         .set({
@@ -7943,7 +7966,7 @@ async function handleWaybillSingleReparseJob(
       // прежним и сверка устаревшую копию не находила: на бою так осталось
       // 18 накладных. После проверки `saved`, иначе устаревшее поколение
       // добавило бы инкремент поверх уже актуальной версии.
-      await markSourceDocumentContentChanged(txDb, sourceDocumentId);
+      await markSourceDocumentContentChanged(txDb, machine, sourceDocumentId);
     });
 
     log.info({ itemsCount: picked.items.length, form: picked.form }, 'накладная распознана заново');

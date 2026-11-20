@@ -139,6 +139,16 @@ import {
 } from '../lib/contractor-scope.js';
 import { expandSupplierFilterIds } from '../domain/directories/supplier-filter-groups.js';
 import { publishEvent } from './events.js';
+import { requestCapabilities } from '../domain/groups/claim-scope.js';
+import { releaseGroupClaim } from '../domain/groups/claim.js';
+import type { Db } from '../db/client.js';
+import {
+  commitMachineClaim,
+  GroupConflictError,
+  lockAndCheckMachineForLink,
+  prepareMachineClaim,
+  type MachineClaimContext,
+} from '../domain/groups/machine-claim.js';
 import { dateRangeConditions } from '../lib/date-range.js';
 import { parseUuidCsv } from '../lib/uuid-csv.js';
 import { escapeLike } from '../lib/like.js';
@@ -1888,15 +1898,28 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         }
 
         await assertPermission(req, 'operations.deliveries', 'create');
-        const created = await createDelivery(
-          app,
-          input,
-          statusId,
-          inspectorId,
-          req.user?.sessionId ?? null,
-          unitModeFor(req, input.statusCode),
-          isMobileClient(req),
-        );
+        let created: Awaited<ReturnType<typeof createDelivery>>;
+        try {
+          created = await createDelivery(
+            app,
+            input,
+            statusId,
+            inspectorId,
+            req.user?.sessionId ?? null,
+            unitModeFor(req, input.statusCode),
+            isMobileClient(req),
+            {
+              capabilities: requestCapabilities(req.headers, input.capabilities),
+              mobile: isMobileClient(req),
+              actorUserId: req.user?.id ?? null,
+            },
+          );
+        } catch (err) {
+          // Typed-отказ протокола — телом 409 как есть (GroupConflictSchema):
+          // новая сборка планшета различает group_claimed и group_changed.
+          if (err instanceof GroupConflictError) return reply.code(409).send(err.conflict);
+          throw err;
+        }
         const dto = await buildDeliveryDto(app, created.id, req.user?.role);
         if (!dto) throw new Error('Delivery missing after create');
         publishEvent(app, {
@@ -2156,6 +2179,15 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           })
           .where(eq(deliveries.id, existing.id));
         await detachDeliveries(tx, [existing.id]);
+        // Помеченная на удаление приёмка освобождает машину (протокол «одна
+        // машина — одна приёмка»): её можно оформить заново. Снятие пометки
+        // машину не занимает и 409 не даёт — правило совместимости №5.
+        await releaseGroupClaim(tx as unknown as Db, {
+          operationKind: 'delivery',
+          operationId: existing.id,
+          actorUserId: req.user?.id ?? null,
+          reason: 'pending_deletion',
+        });
       });
       const dto = await buildDeliveryDto(app, existing.id, req.user?.role);
       if (!dto) return reply.code(404).send({ error: 'not_found' });
@@ -2300,6 +2332,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               })
               .where(eq(deliveries.id, id));
             await detachDeliveries(tx, [id]);
+            await releaseGroupClaim(tx as unknown as Db, {
+              operationKind: 'delivery',
+              operationId: id,
+              actorUserId: req.user?.id ?? null,
+              reason: 'pending_deletion',
+            });
           });
           publishEvent(app, {
             type: 'delivery_updated',
@@ -3249,7 +3287,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       preHandler: [app.authenticate, app.authorize('admin', 'manager')],
       schema: {
         params: z.object({ id: z.string().uuid() }),
-        body: z.object({ sourceDocumentId: z.string().uuid() }),
+        body: z.object({
+          sourceDocumentId: z.string().uuid(),
+          // Осознанная вторая приёмка по уже занятой машине (окно
+          // подтверждения на портале). Без флага — 409 group_claimed.
+          allowSecondOperation: z.boolean().optional(),
+        }),
         response: {
           200: DeliverySchema,
           404: ErrorResponseSchema,
@@ -3298,6 +3341,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       // снаружи и отвечаем 409 без падения сервиса (PK нарушение даёт
       // невнятный 500 без этого хука).
       class AlreadyLinkedError extends Error {}
+      class MachineOccupiedError extends Error {
+        constructor(readonly occupiedBy: { id: string; displayId: number }) {
+          super('machine_occupied');
+        }
+      }
 
       try {
         await app.db.transaction(
@@ -3309,6 +3357,18 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             // (delivery-edo.ts) — приёмка → ключи тождества → строки, иначе
             // встречные привязки одной УПД ждали бы друг друга. NO KEY UPDATE:
             // с KEY SHARE на приёмку от вставки позиций конкурентами не спорит.
+            // Документ машины с портала: замок машины первым действием и
+            // проверка «машина уже в другой приёмке» (защищённая область).
+            if (src.origin !== 'edo_diadoc') {
+              const occupied = await lockAndCheckMachineForLink(tx as Db, {
+                documentId: src.id,
+                deliveryId: d.id,
+                siteId: d.siteId ?? null,
+                allowSecondOperation: req.body.allowSecondOperation === true,
+                actorUserId: req.user?.id ?? null,
+              });
+              if (occupied) throw new MachineOccupiedError(occupied.occupiedBy);
+            }
             let edoGroup: Awaited<ReturnType<typeof lockEdoDocGroup>> | null = null;
             if (src.origin === 'edo_diadoc') {
               await tx
@@ -3458,6 +3518,16 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           return reply.code(409).send({
             error: 'already_linked',
             message: 'УПД уже привязана к этой приёмке',
+          });
+        }
+        if (err instanceof MachineOccupiedError) {
+          return reply.code(409).send({
+            error: 'group_claimed',
+            message: `Эта машина уже в приёмке ${err.occupiedBy.displayId}`,
+            details: {
+              claimedByOperationId: err.occupiedBy.id,
+              claimedByDisplayId: err.occupiedBy.displayId,
+            },
           });
         }
         if (err instanceof ForeignSiteSourceDocumentError) {
@@ -3759,6 +3829,12 @@ async function createDelivery(
    * Только для запросов планшета — см. одноимённый параметр updateDelivery.
    */
   nameOnlyFallback = false,
+  /**
+   * Протокол «одна машина — одна приёмка» (domain/groups/machine-claim.ts):
+   * возможности клиента и кто он. Не передан — прежний путь без проверок
+   * (парная transfer-приёмка, серверные сценарии).
+   */
+  claimCtx: MachineClaimContext | null = null,
 ) {
   // «Ручной внос» на мобиле: инспектор создаёт приёмку сразу со статусом
   // confirmed_mol (без выбора УПД, минуя 1-2 этап). В этом случае
@@ -3793,6 +3869,22 @@ async function createDelivery(
   // мобильном выливалось в исчерпание retry и потерю мутации. Теперь —
   // либо всё, либо ничего. Контракт ответа не меняется.
   return await app.db.transaction(async (tx: typeof app.db) => {
+    // Замок машины и проверки занятости — ПЕРВЫМ действием транзакции, до
+    // шапки и до блокировок позиций (assertSourcesAvailableForDelivery ниже):
+    // порядок «машина → документы → позиции» общий для всех путей.
+    const machineClaim =
+      claimCtx && input.sourceDocumentIds.length
+        ? await prepareMachineClaim(tx, {
+            // Без id (портал создаёт новую) — своей операции ещё нет: чужой
+            // считается любая живая приёмка машины.
+            operationId: input.id ?? '00000000-0000-0000-0000-000000000000',
+            documentIds: input.sourceDocumentIds,
+            siteId: input.siteId ?? null,
+            clientGroupId: input.groupId ?? null,
+            clientGroupRevision: input.groupRevision ?? null,
+            ctx: claimCtx,
+          })
+        : null;
     const [created] = await tx
       .insert(deliveries)
       .values({
@@ -3826,6 +3918,16 @@ async function createDelivery(
       })
       .returning();
     if (!created) throw new Error('Failed to insert delivery');
+    // Занятие машины — сразу после шапки: claim ссылается на приёмку внешним
+    // ключом. Конфликт откатывает всю транзакцию — второй приёмки не будет.
+    if (machineClaim) {
+      await commitMachineClaim(tx, {
+        headId: machineClaim.headId,
+        deliveryId: created.id,
+        actorUserId: claimCtx?.actorUserId ?? null,
+        groupRevision: machineClaim.groupRevision,
+      });
+    }
 
     // Порядок блокировок «документ → позиции» — общий для всех путей, которые
     // трогают и документ, и его позиции: переразбор воркера (UPDATE документа,

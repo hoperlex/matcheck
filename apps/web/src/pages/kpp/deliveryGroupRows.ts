@@ -12,30 +12,32 @@
 import type { ReactNode } from 'react';
 import type { TableProps } from 'antd';
 import { DELIVERY_GROUP_MAX, type Delivery, type DeliveryGroupSummary } from '@matcheck/contracts';
+import {
+  buildKeyedGroupRows,
+  groupHeadId as sharedGroupHeadId,
+  isGroupHead as sharedIsGroupHead,
+  withGroupRows as sharedWithGroupRows,
+  type GroupGutter as SharedGroupGutter,
+  type KeyedGroupHead,
+} from '../../shared/ui/groupRows';
 
 type Column<T> = NonNullable<TableProps<T>['columns']>[number];
 
 /** Кусок скобки слева от строки: кнопка, линия, уголок у последней. */
-export type GroupGutter = 'head' | 'mid' | 'end' | null;
+export type GroupGutter = SharedGroupGutter;
 
-/** Строка группы над её приёмками. */
-export type GroupHeadRow = {
-  kind: 'group';
-  /** `group:<uuid>` — таблица работает по rowKey="id". */
-  id: string;
-  group: DeliveryGroupSummary;
-  /** Приёмки группы, попавшие на эту страницу (после фильтров), по порядку. */
-  visibleIds: string[];
-  collapsed: boolean;
-};
+/** Строка группы над её приёмками. Ядро — shared/ui/groupRows.ts. */
+// `key` необязателен: «Принятые» ключ берут из group.id и строку группы
+// могут собрать сами (тесты, карточка узкого экрана).
+export type GroupHeadRow = Omit<KeyedGroupHead<DeliveryGroupSummary>, 'key'> & { key?: string };
 
 type Groupable = { id: string; deliveryGroup?: DeliveryGroupSummary | null };
 
 export function isGroupHead(row: object): row is GroupHeadRow {
-  return (row as { kind?: unknown }).kind === 'group';
+  return sharedIsGroupHead(row);
 }
 
-export const groupHeadId = (groupId: string) => `group:${groupId}`;
+export const groupHeadId = sharedGroupHeadId;
 
 /**
  * Строки таблицы с группами: строка группы — перед первой её приёмкой на
@@ -47,48 +49,11 @@ export function buildGroupedRows<T extends Groupable>(
   items: readonly T[],
   collapsed: ReadonlySet<string>,
 ): { rows: Array<T | GroupHeadRow>; gutter: ReadonlyMap<string, GroupGutter> } {
-  const clusters = new Map<string, T[]>();
-  const order: Array<{ groupId: string | null; row: T }> = [];
-  for (const row of items) {
-    const groupId = row.deliveryGroup?.id ?? null;
-    if (!groupId) {
-      order.push({ groupId: null, row });
-      continue;
-    }
-    const cluster = clusters.get(groupId);
-    if (cluster) {
-      cluster.push(row);
-      continue;
-    }
-    clusters.set(groupId, [row]);
-    order.push({ groupId, row });
-  }
-
-  const rows: Array<T | GroupHeadRow> = [];
-  const gutter = new Map<string, GroupGutter>();
-  for (const entry of order) {
-    if (!entry.groupId) {
-      rows.push(entry.row);
-      continue;
-    }
-    const members = clusters.get(entry.groupId)!;
-    const isCollapsed = collapsed.has(entry.groupId);
-    const head: GroupHeadRow = {
-      kind: 'group',
-      id: groupHeadId(entry.groupId),
-      group: entry.row.deliveryGroup!,
-      visibleIds: members.map((m) => m.id),
-      collapsed: isCollapsed,
-    };
-    rows.push(head);
-    gutter.set(head.id, 'head');
-    if (isCollapsed) continue;
-    members.forEach((member, index) => {
-      rows.push(member);
-      gutter.set(member.id, index === members.length - 1 ? 'end' : 'mid');
-    });
-  }
-  return { rows, gutter };
+  return buildKeyedGroupRows<T, DeliveryGroupSummary>(
+    items,
+    (row) => (row.deliveryGroup ? { key: row.deliveryGroup.id, group: row.deliveryGroup } : null),
+    collapsed,
+  );
 }
 
 type GroupRowFields = Pick<
@@ -136,39 +101,13 @@ export function groupLeaveBlock(
   return null;
 }
 
-/**
- * Колонки страницы, пережившие строки групп. rc-table 7.54 зовёт `render`
- * ячейки ДО проверки `colSpan === 0` (rc-table/es/Cell), поэтому обернуть надо
- * сам `render`: колонка, читающая `r.status.code`, упала бы на строке группы.
- *
- * У строки группы первая колонка растянута на всю ширину (плюс ячейка выбора,
- * её закрывает `rowSelection.onCell`), остальные — `colSpan: 0`.
- */
+/** Колонки страницы, пережившие строки групп — см. shared/ui/groupRows.ts. */
 export function withGroupRows<T extends object>(
   columns: readonly Column<T>[],
   renderHead: (head: GroupHeadRow) => ReactNode,
   opts: { selectionCell: boolean },
 ): Column<T | GroupHeadRow>[] {
-  const span = columns.length + (opts.selectionCell ? 1 : 0);
-  return columns.map((col, index) => {
-    // Собственные render/onCell колонки — как есть: обёртка лишь не пускает
-    // в них строку группы.
-    const original = col as {
-      render?: (value: unknown, record: T, i: number) => unknown;
-      onCell?: (record: T, i?: number) => object;
-    };
-    const render = (value: unknown, record: T | GroupHeadRow, i: number): ReactNode => {
-      if (isGroupHead(record)) return index === 0 ? renderHead(record) : null;
-      return original.render
-        ? (original.render(value, record, i) as ReactNode)
-        : (value as ReactNode);
-    };
-    const onCell = (record: T | GroupHeadRow, i?: number) => {
-      if (isGroupHead(record)) return { colSpan: index === 0 ? span : 0 };
-      return original.onCell ? original.onCell(record, i) : {};
-    };
-    return { ...col, render, onCell } as unknown as Column<T | GroupHeadRow>;
-  });
+  return sharedWithGroupRows<T, GroupHeadRow>(columns, renderHead, opts);
 }
 
 /** «3 приёмки», «1 приёмка», «5 приёмок». */

@@ -40,6 +40,7 @@ import { sourceDocumentItems, sourceDocuments } from '../src/db/schema.js';
 import { deriveUpdParseOutcome } from '../src/domain/edo/upd-outcome.js';
 import { validateUpdTotals } from '../src/domain/edo/upd-validation.js';
 import { bumpGroupRevision } from '../src/domain/sourceDocuments/document-group.js';
+import { lockMachineHead } from '../src/domain/sourceDocuments/machine-lock.js';
 import { recordVisibilityTransitions } from '../src/domain/sourceDocuments/visibility-events.js';
 
 function argValue(flag: string): string | null {
@@ -148,6 +149,8 @@ async function main(): Promise<void> {
     }
 
     await db.transaction(async (tx) => {
+      // Замок машины — первым действием, до записи документа (machine-lock.ts).
+      const machine = await lockMachineHead(tx as never, { documentId: doc.id });
       await tx
         .update(sourceDocuments)
         .set({
@@ -165,7 +168,7 @@ async function main(): Promise<void> {
       // Планшет узнаёт о появлении документа только через версию группы и
       // журнал видимости: дельта /sync отбирает по updated_at группы, а не
       // одного документа.
-      await bumpGroupRevision(tx as never, doc.id);
+      await bumpGroupRevision(tx as never, machine);
       await recordVisibilityTransitions(tx as never, {
         documentIds: [doc.id],
         reason: 'документ признан готовым по правилу «номер + материалы»',

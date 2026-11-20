@@ -31,6 +31,7 @@ import {
   recordVisibilityTransitions,
   selectVisibilityTombstones,
 } from '../../src/domain/sourceDocuments/visibility-events.js';
+import { lockMachineHead } from '../../src/domain/sourceDocuments/machine-lock.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const suite = TEST_DATABASE_URL ? describe : describe.skip;
@@ -154,13 +155,23 @@ suite('журнал переходов видимости (реальный Post
     await doc(b, root);
 
     // Оба видны — событий нет.
-    await recordVisibilityTransitions(db, { groupId: root, reason: 'опубликовано' });
+    await db.transaction(async (tx) =>
+      recordVisibilityTransitions(tx, {
+        machine: await lockMachineHead(tx as never, { bundleId: root }),
+        reason: 'опубликовано',
+      }),
+    );
     expect(await events(a)).toHaveLength(0);
     expect(await events(b)).toHaveLength(0);
 
     // Один документ ушёл на переразбор — по предикату скрывается ВСЯ машина.
     await sql`UPDATE source_documents SET status = 'queued' WHERE id = ${b}`;
-    await recordVisibilityTransitions(db, { groupId: root, reason: 'переразбор документа машины' });
+    await db.transaction(async (tx) =>
+      recordVisibilityTransitions(tx, {
+        machine: await lockMachineHead(tx as never, { bundleId: root }),
+        reason: 'переразбор документа машины',
+      }),
+    );
 
     // Событие обязано появиться у обоих, иначе на планшете останется половина.
     expect((await events(a)).map((e) => e.visibility)).toEqual(['hidden']);
