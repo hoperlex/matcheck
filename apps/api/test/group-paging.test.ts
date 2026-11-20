@@ -87,6 +87,29 @@ describe('страница не разрывает поставку', () => {
 
   it('страница за пределами набора пуста, а пустой список — это одна страница', () => {
     expect(pageOfGroupedRows(group('a', 2), 5, 50).rows).toEqual([]);
-    expect(pageOfGroupedRows([], 1, 50)).toEqual({ rows: [], pageCount: 1 });
+    expect(pageOfGroupedRows([], 1, 50)).toEqual({ rows: [], pageCount: 1, rowOffset: 0 });
+  });
+
+  it('rowOffset — сколько строк на предыдущих страницах: «№» идёт без пропусков', () => {
+    // Страница короче pageSize: 9 одиночек, поставка из 3 уехала на вторую.
+    const short = [
+      ...Array.from({ length: 9 }, (_, i) => group(`s${i}`, 1)).flat(),
+      ...group('g', 3),
+    ];
+    expect(pageOfGroupedRows(short, 1, 10).rowOffset).toBe(0);
+    expect(pageOfGroupedRows(short, 2, 10).rowOffset).toBe(9);
+    // Страница длиннее pageSize: поставка из 7 при странице 5.
+    const long = [...group('big', 7), ...group('a', 1), ...group('b', 1)];
+    expect(pageOfGroupedRows(long, 2, 5).rowOffset).toBe(7);
+    // Сквозная нумерация: начало каждой страницы = число строк до неё.
+    const rows = [...group('x', 4), ...group('y', 3), ...group('z', 1), ...group('w', 6)];
+    const { pageCount } = pageOfGroupedRows(rows, 1, 5);
+    let seen = 0;
+    for (let p = 1; p <= pageCount; p++) {
+      const page = pageOfGroupedRows(rows, p, 5);
+      expect(page.rowOffset).toBe(seen);
+      seen += page.rows.length;
+    }
+    expect(seen).toBe(rows.length);
   });
 });

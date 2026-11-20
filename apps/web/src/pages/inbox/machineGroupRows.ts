@@ -96,7 +96,7 @@ export function machineHeadParts(head: MachineHeadRow): {
   const uploads = head.group.machine?.uploadCount ?? 1;
   const deliveries = head.group.machine?.deliveryNumbers ?? [];
   return {
-    title: `Поставка · ${documentsCount(total)}`,
+    title: documentsCount(total),
     numbers: machineNumbersLine(head.group.members),
     origin:
       uploads > 1

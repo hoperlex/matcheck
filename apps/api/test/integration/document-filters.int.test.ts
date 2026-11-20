@@ -328,7 +328,15 @@ suite('фильтры документов (реальный PostgreSQL)', { tim
 
     const seen: string[] = [];
     for (let p = 0; p < pageCount; p++) {
-      seen.push(...(await listIds(`${query}&offset=${p * 3}`)));
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/source-documents?${query}&offset=${p * 3}`,
+      });
+      const body = res.json() as { items: { id: string }[]; rowOffset?: number };
+      // «№» страницы начинается с числа строк до неё — без пропусков номеров
+      // при плавающих страницах (в этой выборке принятых файлов нет).
+      expect(body.rowOffset).toBe(seen.length);
+      seen.push(...body.items.map((i) => i.id));
     }
     // Ни одна строка не потерялась между страницами и не показалась дважды.
     expect(new Set(seen).size).toBe(seen.length);

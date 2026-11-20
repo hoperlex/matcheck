@@ -1337,11 +1337,12 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
             pendingRows: [...pendingRows],
             pendingTotal,
             pageCount: pageRows.pageCount,
+            rowOffset: pageRows.rowOffset,
           };
         },
         { isolationLevel: 'repeatable read' },
       );
-      const { rows, count, pendingRows, pendingTotal, pageCount } = snapshot;
+      const { rows, count, pendingRows, pendingTotal, pageCount, rowOffset } = snapshot;
       // Сводка машин страницы — одним запросом, по всей машине (не по фильтру).
       const summaries = await machineSummaries(
         app.db as unknown as Db,
@@ -1375,6 +1376,8 @@ export async function sourceDocumentRoutes(rawApp: FastifyInstance): Promise<voi
         // Сколько страниц получилось при упаковке по поставкам: пагинатор не
         // может вывести это из total, потому что страницы плавающие.
         pageCount,
+        // С какого номера считать «№» на этой странице — по той же упаковке.
+        rowOffset,
         ...(pendingAllowed
           ? {
               pendingFiles: pendingRows.map((p) => ({

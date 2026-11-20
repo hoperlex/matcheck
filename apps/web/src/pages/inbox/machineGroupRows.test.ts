@@ -60,7 +60,7 @@ describe('поставки скобкой в «Документах»', () => {
     ];
     const head = buildMachineRows(items, new Set()).rows[0] as MachineHeadRow;
     const parts = machineHeadParts(head);
-    expect(parts.title).toBe('Поставка · 3 документа');
+    expect(parts.title).toBe('3 документа');
     expect(parts.numbers).toBe('УПД УТ-134, УТ-135 · Накладная 85/11');
     expect(parts.origin).toBe('одной отправкой');
     expect(parts.merged).toBe(false);

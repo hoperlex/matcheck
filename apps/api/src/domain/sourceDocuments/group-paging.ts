@@ -32,6 +32,12 @@ export type GroupPagingResult<T> = {
   rows: T[];
   /** Сколько всего страниц получилось при такой упаковке. */
   pageCount: number;
+  /**
+   * Сколько строк легло на предыдущие страницы. Страницы плавающие, поэтому
+   * `(page - 1) * pageSize` тут не годится: если на первой странице 48 строк,
+   * номера второй начинались бы с 51 и «№» 49–50 пропадали бы.
+   */
+  rowOffset: number;
 };
 
 /**
@@ -88,5 +94,6 @@ export function pageOfGroupedRows<T extends GroupPagingRow>(
     // Пустой набор — всё равно одна (пустая) страница: пагинатор не должен
     // показывать «0 страниц».
     pageCount: Math.max(1, pages.length),
+    rowOffset: pages.slice(0, Math.max(0, page - 1)).reduce((n, p) => n + p.length, 0),
   };
 }

@@ -121,6 +121,14 @@ function wrapRender<T>(origRender: Column<T>['render']): Column<T>['render'] {
 // счёт не входят: «№» — это номер документа или операции, а не строки.
 const isGroupRow = (it: unknown): boolean => (it as { kind?: unknown }).kind === 'group';
 
+// Сколько номеров занимают скрытые члены свёрнутой группы. Номер закреплён за
+// документом, а не за видимой строкой: свернули поставку из трёх с №37–39 —
+// следующая строка остаётся №40, как в раскрытом виде, а не съезжает на №37.
+const hiddenByGroupRow = (it: unknown): number => {
+  const g = it as { collapsed?: unknown; visibleIds?: unknown };
+  return g.collapsed === true && Array.isArray(g.visibleIds) ? g.visibleIds.length : 0;
+};
+
 export function ResponsiveTable<T extends object>({
   items,
   columns,
@@ -269,7 +277,10 @@ export function ResponsiveTable<T extends object>({
     const m = new Map<string, number>();
     let n = 0;
     items.forEach((it) => {
-      if (isGroupRow(it)) return;
+      if (isGroupRow(it)) {
+        n += hiddenByGroupRow(it);
+        return;
+      }
       m.set(getRowKey(it), n);
       n += 1;
     });

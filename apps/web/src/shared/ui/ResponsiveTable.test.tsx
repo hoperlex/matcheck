@@ -120,6 +120,51 @@ describe('ResponsiveTable: вид FOT', () => {
     expect(numTh!.classList.contains('ant-table-column-has-sorters')).toBe(false);
   });
 
+  it('«№» закреплён за строкой: свёрнутая группа занимает номера скрытых членов', () => {
+    type GRow = {
+      id: string;
+      name: string;
+      kind?: 'group';
+      collapsed?: boolean;
+      visibleIds?: string[];
+    };
+    const numbersOf = (items: GRow[]) => {
+      const { container, unmount } = render(
+        <ResponsiveTable<GRow>
+          items={items}
+          rowKey="id"
+          numbered
+          numberedOffset={36}
+          cardRender={(r) => r.name}
+          columns={[{ title: 'Имя', dataIndex: 'name' }]}
+        />,
+      );
+      const out = Array.from(container.querySelectorAll('.ant-table-tbody > tr.ant-table-row')).map(
+        (tr) => [tr.querySelector('td.mc-col-num')?.textContent ?? '', tr.textContent ?? ''],
+      );
+      unmount();
+      return out;
+    };
+    const head = (collapsed: boolean): GRow => ({
+      id: 'group:g',
+      name: 'группа',
+      kind: 'group',
+      collapsed,
+      visibleIds: ['a', 'b', 'c'],
+    });
+    const members: GRow[] = ['a', 'b', 'c'].map((id) => ({ id, name: `член ${id}` }));
+    const after: GRow = { id: 'z', name: 'следующий' };
+
+    const expanded = numbersOf([head(false), ...members, after]);
+    expect(expanded.map(([n]) => n)).toEqual(['', '37', '38', '39', '40']);
+    // Свернули — строка «следующий» сохраняет свой №40, а не съезжает на №37.
+    const collapsed = numbersOf([head(true), after]);
+    expect(collapsed).toEqual([
+      ['', 'группа'],
+      ['40', '40следующий'],
+    ]);
+  });
+
   it('по умолчанию «№» сортируемый, как раньше', () => {
     const { container } = renderTable({ numbered: true });
     const numTh = Array.from(container.querySelectorAll('.ant-table-thead th')).find(

@@ -1680,7 +1680,10 @@ export default function InboxPage() {
               ) : null,
           }}
           onChange={handleTableChange as unknown as TableProps<TableRow>['onChange']}
-          numberedOffset={(page - 1) * PAGE_SIZE}
+          // Страницы плавающие (сервер не рвёт поставку), поэтому начало «№»
+          // берём у сервера: «(page - 1) * PAGE_SIZE» давал пропуски номеров.
+          // Без поля (старая сборка API) — прежний расчёт.
+          numberedOffset={list.data?.rowOffset ?? (page - 1) * PAGE_SIZE}
           rowSelection={
             isContractor
               ? undefined
