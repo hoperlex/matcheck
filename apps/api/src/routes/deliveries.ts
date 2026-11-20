@@ -20,6 +20,7 @@ import {
   allowedDeliveryPurposes,
   BulkDeleteRequestSchema,
   DELIVERY_PURPOSE_LABELS,
+  parseDeliveryPurposeFilter,
   BulkDeleteResponseSchema,
   ConflictResponseSchema,
   DeliveryListResponseSchema,
@@ -88,6 +89,7 @@ import {
   reconcileLinkedDocumentPurposes,
   type RecipientWrite,
 } from '../domain/operations/delivery-purpose.js';
+import { deliveryPurposeFilterCondition } from '../domain/operations/delivery-purpose-filter.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
 import { resolveConfirmedAt } from '../domain/operations/confirmed-at.js';
@@ -190,6 +192,10 @@ const ListQuerySchema = z.object({
   // Признаки приёмки, AND между выбранными:
   //   transit, assets, upd, waybill, doc_attention, edo.
   features: z.string().optional(),
+  // «Признак приёмки» (CSV, ИЛИ между выбранными): коды DeliveryPurpose и
+  // none — «Не указан». Неизвестные отбрасываются, как у features. Правило —
+  // domain/operations/delivery-purpose-filter.ts.
+  purposes: z.string().max(200).optional(),
   // Диапазон даты прибытия (ISO). Используется для архивных запросов
   // «приёмки за прошлый месяц», когда нужное >limit/offset назад.
   arrivedFrom: z.string().datetime().optional(),
@@ -1002,6 +1008,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       displayId,
       plate,
       features: featuresCsv,
+      purposes: purposesCsv,
       arrivedFrom,
       arrivedTo,
       nophoto,
@@ -1017,6 +1024,7 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     const supplierDirIds = parseUuidCsv(supplierIdsCsv);
     const siteIdsArr = parseUuidCsv(siteIdsCsv);
     const featureCodes = parseCsv(featuresCsv).filter((f) => KNOWN_FEATURES.has(f));
+    const purposeValues = parseDeliveryPurposeFilter(parseCsv(purposesCsv));
 
     const filters = [];
     // По умолчанию показываем только активные документы; trash=true даёт корзину.
@@ -1189,6 +1197,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
     // Вид операции: «Ручной внос» / с машиной.
     if (entry) {
       filters.push(eq(deliveries.isManual, entry === 'manual'));
+    }
+
+    // «Признак приёмки»: общий признак или свой у документа в режиме «Разные
+    // получатели». Признак виден в карточке всем, кому открыт список, — права
+    // на фильтр отдельно не проверяем.
+    if (purposeValues.length > 0) {
+      filters.push(deliveryPurposeFilterCondition(purposeValues));
     }
 
     // features (AND между выбранными):

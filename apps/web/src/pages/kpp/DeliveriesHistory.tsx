@@ -1,17 +1,7 @@
 import type { MouseEvent, ReactNode } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import {
-  Alert,
-  Button,
-  Card,
-  Input,
-  Popconfirm,
-  Space,
-  Tooltip,
-  Typography,
-  message,
-} from 'antd';
+import { Alert, Button, Card, Input, Popconfirm, Space, Tooltip, Typography, message } from 'antd';
 import {
   ApartmentOutlined,
   CheckSquareOutlined,
@@ -33,7 +23,13 @@ import type {
   DeliveryListResponseSchema,
   Site,
 } from '@matcheck/contracts';
-import { DELIVERY_SOFT_DELETE_STATUSES } from '@matcheck/contracts';
+import {
+  DELIVERY_PURPOSE_FILTER_LABELS,
+  DELIVERY_PURPOSE_FILTER_VALUES,
+  DELIVERY_SOFT_DELETE_STATUSES,
+  parseDeliveryPurposeFilter,
+  type DeliveryPurposeFilterValue,
+} from '@matcheck/contracts';
 import type { z } from 'zod';
 import type { ColumnsType, TableRowSelection } from 'antd/es/table/interface';
 import dayjs from 'dayjs';
@@ -57,8 +53,7 @@ import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { LegendOrBulkBar } from '../../shared/ui/LegendOrBulkBar';
-import {
-} from '../../shared/ui/tableSorters';
+import {} from '../../shared/ui/tableSorters';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import {
@@ -130,6 +125,13 @@ export { bulkEdoLinkBlock };
 
 // Статусы, для которых вместо hard-delete показываем «Пометить на удаление»,
 // берём из @matcheck/contracts — общий источник с сервером (см. statuses.ts).
+
+// Пункты «Признака приёмки»: подписи как в теге карточки, без номеров «1 …»
+// из её выбора; последним — «Не указан».
+const PURPOSE_FILTER_OPTIONS = DELIVERY_PURPOSE_FILTER_VALUES.map((value) => ({
+  value,
+  label: DELIVERY_PURPOSE_FILTER_LABELS[value],
+}));
 
 const ARRIVAL_DATE_FMT = new Intl.DateTimeFormat('ru-RU', {
   day: '2-digit',
@@ -296,6 +298,10 @@ export function DeliveriesHistory({
     displayId: string;
     plate: string;
     features: OperationFeature[];
+    // «Признак приёмки» — повторяющиеся ?purpose=A&purpose=B, ИЛИ между ними.
+    // Ключ тот же, что у «Типа отгрузки»: у каждой вкладки «Операций» своё
+    // значение (OPERATIONS_TAB_KEYS), чужое из адреса отбрасывается разбором.
+    purposes: DeliveryPurposeFilterValue[];
     // ?nophoto=1 — deep-link из дашборда «Статистика». В UI селекта нет,
     // ради единственного use-case городить отдельный псевдо-статус
     // (как было с no_document) избыточно. Сбрасывается ручной очисткой URL.
@@ -325,6 +331,7 @@ export function DeliveriesHistory({
     displayId: params.get('id') ?? '',
     plate: params.get('plate') ?? '',
     features: urlFeatures,
+    purposes: parseDeliveryPurposeFilter(params.getAll('purpose')),
     nophoto: params.get('nophoto') === '1',
     nophotoOlderHours: params.get('nophotoHours'),
     reviewState: params.get('review'),
@@ -350,6 +357,10 @@ export function DeliveriesHistory({
     if ('features' in patch) {
       next.delete('feature');
       for (const f of patch.features ?? []) next.append('feature', f);
+    }
+    if ('purposes' in patch) {
+      next.delete('purpose');
+      for (const p of patch.purposes ?? []) next.append('purpose', p);
     }
     // nophoto приходит дип-линком из «Статистики»; писать его панель не умела
     // вовсе, поэтому снять фильтр можно было только правкой адреса.
@@ -417,6 +428,7 @@ export function DeliveriesHistory({
       displayId: filters.displayId,
       plate: filters.plate,
       features: filters.features.join(','),
+      purposes: filters.purposes.join(','),
       status: filters.status,
       nophoto: filters.nophoto,
       nophotoHours: filters.nophotoOlderHours,
@@ -837,8 +849,8 @@ export function DeliveriesHistory({
   // пользователь может «удалить выбранные строки» на странице 7,
   // забыв что они с прошлой выборки). useEffect ниже отслеживает
   // комбинированный ключ фильтров.
-  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dispatcherCheck ?? ''}|${filters.entry ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
-   
+  const filterKey = `${filters.contractorIds.join(',')}|${filters.supplierIds.join(',')}|${filters.siteIds.join(',')}|${filters.q}|${filters.displayId}|${filters.plate}|${filters.features.join(',')}|${filters.purposes.join(',')}|${filters.status ?? ''}|${filters.nophoto ? '1' : ''}|${filters.reviewState ?? ''}|${filters.dispatcherCheck ?? ''}|${filters.entry ?? ''}|${filters.dateFrom}|${filters.dateTo}|${view}`;
+
   // Сброс страницы и выбора — только на РЕАЛЬНУЮ смену фильтра. Эффект с
   // массивом зависимостей срабатывает и на монтировании, и ссылка вида
   // ?page=4 открывалась первой страницей: коллега получал не тот экран,
@@ -1179,6 +1191,17 @@ export function DeliveriesHistory({
                     }}
                     showPurpose={false}
                     availableFeatures={deliveryFeatures}
+                  />
+                  {/* Признак приёмки (как в карточке) — всем, кому открыт список. */}
+                  <FilterSelect
+                    mode="multiple"
+                    // 230: «Давальческий акт» в поле целиком; длиннее — многоточие и подсказка.
+                    width={230}
+                    popupWidth={240}
+                    placeholder="Признак приёмки"
+                    value={filters.purposes}
+                    onChange={(v: DeliveryPurposeFilterValue[]) => updateFilters({ purposes: v })}
+                    options={PURPOSE_FILTER_OPTIONS}
                   />
                   {/* Вид операции — всем: ручной внос (без машины) / с машиной. */}
                   <FilterSelect

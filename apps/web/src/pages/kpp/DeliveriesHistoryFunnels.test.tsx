@@ -255,3 +255,41 @@ describe('Принятые (приёмка): воронки в шапке', () =
     expect(screen.queryByTitle('УПД из ЭДО/СБИС')).toBeNull();
   });
 });
+
+describe('Принятые (приёмка): «Признак приёмки»', () => {
+  function purposeSelect(): Element {
+    return screen.getByText('Признак приёмки').closest('.ant-select')!;
+  }
+
+  it('несколько пунктов — повторяющийся ?purpose в адресе и purposes CSV на сервер', async () => {
+    await renderHistory();
+    fireEvent.mouseDown(purposeSelect().querySelector('.ant-select-selector')!);
+    fireEvent.click(await screen.findByTitle('Давальческий акт'));
+    await waitFor(() => expect(search).toContain('purpose=tolling_act'));
+    fireEvent.click(await screen.findByTitle('Не указан'));
+
+    await waitFor(() => expect(new URLSearchParams(search).getAll('purpose')).toHaveLength(2));
+    expect(new URLSearchParams(search).getAll('purpose').sort()).toEqual(['none', 'tolling_act']);
+    // Порядок на сервере — порядок пунктов, а не порядок кликов.
+    await expectListRequest({ purposes: 'tolling_act,none' });
+  });
+
+  it('чужое значение из ссылки (тип отгрузки) не уходит на сервер, известное — уходит', async () => {
+    await renderHistory(
+      `/operations?purpose=${encodeURIComponent('Вывоз материала')}&purpose=none`,
+    );
+    await expectListRequest({ purposes: 'none' });
+    expect(listQueries().some((qs) => qs.get('purposes')?.includes('Вывоз'))).toBe(false);
+    // Выбранный пункт виден в поле — фильтр не действует «втихую».
+    const tag = Array.from(document.querySelectorAll('.ant-select .ant-tag')).find(
+      (el) => el.textContent?.trim() === 'Не указан',
+    );
+    expect(tag).toBeTruthy();
+  });
+
+  it('без выбора параметра нет', async () => {
+    await renderHistory();
+    await expectListRequest({});
+    expect(listQueries().some((qs) => qs.has('purposes'))).toBe(false);
+  });
+});

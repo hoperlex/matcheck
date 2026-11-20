@@ -37,6 +37,31 @@ describe('operationsListQuery: вид операции (ручной внос / 
   });
 });
 
+describe('operationsListQuery: «Признак приёмки» / «Тип отгрузки»', () => {
+  it('у приёмки уходят только известные коды, в порядке пунктов', () => {
+    const filters = readOperationsFilters(
+      new URLSearchParams('purpose=none&purpose=foo&purpose=tolling_act&purpose=none'),
+    );
+    expect(operationsListQuery(filters, { kind: 'delivery' }).get('purposes')).toBe(
+      'tolling_act,none',
+    );
+  });
+
+  it('у приёмки одни чужие значения (тип отгрузки из старой ссылки) — параметра нет', () => {
+    const filters = readOperationsFilters(new URLSearchParams('purpose=Вывоз+материала'));
+    expect(operationsListQuery(filters, { kind: 'delivery' }).has('purposes')).toBe(false);
+  });
+
+  it('у отгрузки «Тип отгрузки» уходит как раньше', () => {
+    const filters = readOperationsFilters(
+      new URLSearchParams('purpose=Вывоз+материала&purpose=Другое'),
+    );
+    expect(operationsListQuery(filters, { kind: 'shipment' }).get('purposes')).toBe(
+      'Вывоз материала,Другое',
+    );
+  });
+});
+
 describe('«Сбросить» в «Принятых»', () => {
   // Шпион за чтением адреса: какие ключи на самом деле читает
   // readOperationsFilters. Список сброса обязан совпадать с ним — иначе новый

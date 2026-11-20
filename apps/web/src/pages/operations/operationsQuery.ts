@@ -8,6 +8,7 @@
  * Держать вторую копию правил нельзя: следующий фильтр снова забудут добавить.
  */
 import dayjs from 'dayjs';
+import { parseDeliveryPurposeFilter } from '@matcheck/contracts';
 
 export type OperationsFilters = {
   contractorIds: string[];
@@ -18,7 +19,11 @@ export type OperationsFilters = {
   displayId: string;
   plate: string;
   features: string[];
-  /** Только у отгрузок: «Тип отгрузки» из мобильной формы. */
+  /**
+   * У отгрузок — «Тип отгрузки» из мобильной формы, у приёмок — «Признак
+   * приёмки» (коды DeliveryPurpose и none). В адресе у обоих ?purpose=, но у
+   * каждой вкладки своё значение (OPERATIONS_TAB_KEYS в listMemory).
+   */
   purposes?: string[];
   nophoto: boolean;
   // Порог «давно без фото» (часы) — приходит из плашки «Требует внимания»,
@@ -128,7 +133,14 @@ export function operationsListQuery(
   if (filters.q.trim()) qs.set('q', filters.q.trim());
   if (filters.displayId.trim()) qs.set('displayId', filters.displayId.trim());
   if (filters.plate.trim()) qs.set('plate', filters.plate.trim());
-  if (filters.purposes?.length) qs.set('purposes', filters.purposes.join(','));
+  // У приёмки — только известные коды: экспорт читает адрес сам
+  // (readOperationsFilters), и чужое значение из старой ссылки не должно
+  // уходить на сервер иначе, чем у таблицы.
+  const purposes =
+    opts.kind === 'delivery'
+      ? parseDeliveryPurposeFilter(filters.purposes ?? [])
+      : (filters.purposes ?? []);
+  if (purposes.length) qs.set('purposes', purposes.join(','));
   if (filters.features.length) qs.set('features', filters.features.join(','));
   if (filters.nophoto) {
     qs.set('nophoto', '1');

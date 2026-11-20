@@ -96,6 +96,35 @@ export const DELIVERY_PURPOSE_LABELS: Record<DeliveryPurpose, string> = {
   realization_tolling: 'Реализация + давальческий',
 };
 
+/**
+ * Пункты фильтра «Признак приёмки» в «Принятых»: пять признаков и «Не указан»
+ * (признак не выбран). Приёмка подходит, если хоть один из её признаков — общий
+ * или свой у документа в режиме «Разные получатели» — среди выбранных.
+ */
+export const DELIVERY_PURPOSE_FILTER_NONE = 'none' as const;
+export const DELIVERY_PURPOSE_FILTER_VALUES = [
+  ...DeliveryPurposeSchema.options,
+  DELIVERY_PURPOSE_FILTER_NONE,
+] as const;
+export type DeliveryPurposeFilterValue = (typeof DELIVERY_PURPOSE_FILTER_VALUES)[number];
+
+export const DELIVERY_PURPOSE_FILTER_LABELS: Record<DeliveryPurposeFilterValue, string> = {
+  ...DELIVERY_PURPOSE_LABELS,
+  none: 'Не указан',
+};
+
+/**
+ * Значения фильтра из адреса или CSV запроса: только известные коды, без
+ * повторов, в порядке пунктов. Один разбор для портала и сервера — чужое
+ * (например, «Тип отгрузки» из старой ссылки) не сужает ни таблицу, ни выгрузку.
+ */
+export function parseDeliveryPurposeFilter(
+  values: readonly string[],
+): DeliveryPurposeFilterValue[] {
+  const picked = new Set(values);
+  return DELIVERY_PURPOSE_FILTER_VALUES.filter((v) => picked.has(v));
+}
+
 /** Вид получателя приёмки: подрядчик (contractor_id), МОЛ (recipient_mol_id) или никто. */
 export type DeliveryRecipientKind = 'contractor' | 'mol' | null;
 

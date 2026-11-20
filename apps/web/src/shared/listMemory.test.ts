@@ -199,6 +199,19 @@ describe('listMemory', () => {
       expect(params.get('dfrom')).toBe('2026-11-01');
     });
 
+    it('«Признак приёмки» и «Тип отгрузки» (оба ?purpose=) помнятся каждый на своей вкладке', () => {
+      recordListUrl('/operations', '?type=delivery&tab=accepted&purpose=tolling_act&purpose=none');
+      recordListUrl('/operations', '?type=shipment&tab=accepted&purpose=Другое');
+
+      const toDelivery = new URLSearchParams('type=delivery&tab=accepted&purpose=Другое');
+      applyOperationsTabMemory(toDelivery, { type: 'delivery', tab: 'accepted' });
+      expect(toDelivery.getAll('purpose')).toEqual(['tolling_act', 'none']);
+
+      const toShipment = new URLSearchParams('type=shipment&tab=accepted&purpose=tolling_act');
+      applyOperationsTabMemory(toShipment, { type: 'shipment', tab: 'accepted' });
+      expect(toShipment.getAll('purpose')).toEqual(['Другое']);
+    });
+
     it('without memory the tab-specific params are simply dropped', () => {
       const params = new URLSearchParams('status=filled&id=12&page=4&site=s1');
       applyOperationsTabMemory(params, { type: 'delivery', tab: 'accepted' });
