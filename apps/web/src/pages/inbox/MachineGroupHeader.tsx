@@ -1,56 +1,36 @@
-import type { MouseEvent } from 'react';
-import { Button, Popconfirm, Space, Tag, Typography } from 'antd';
-import { UngroupOutlined } from '@ant-design/icons';
-import { formatDateRu } from '../../shared/utils/formatRu';
-import { isPendingRow } from './pendingRow';
-import { machineHeadParts, type MachineHeadRow } from './machineGroupRows';
-
-const stop = (event: MouseEvent) => event.stopPropagation();
+import { Space, Tag, Typography } from 'antd';
+import { formatDateRangeRu, UnmergeButton } from './MachineGroupHeadCells';
+import { machineHeadSummary, type MachineHeadRow } from './machineGroupRows';
 
 /**
- * Строка поставки над её документами: сколько документов, номера, откуда
- * пришла, принята ли. Кнопка «Разъединить» — только у объединённой вручную
- * машины. Клик по самой строке сворачивает группу (кнопка не всплывает).
+ * Строка поставки в карточке узкого экрана: колонок там нет, поэтому сводка —
+ * одной надписью с переносами. В таблице строка поставки раскладывается по
+ * колонкам (MachineGroupHeadCells); сводка у обоих одна — machineHeadSummary.
  */
 export function MachineGroupHeader({
   head,
   canUnmerge,
   onUnmerge,
   unmerging,
-  wrap = false,
 }: {
   head: MachineHeadRow;
   canUnmerge: boolean;
   onUnmerge: () => void;
   unmerging: boolean;
-  /** Переносить по строкам — в карточке узкого экрана; в таблице одна строка. */
-  wrap?: boolean;
 }) {
-  const parts = machineHeadParts(head);
-  const firstDoc = head.group.members.find((r) => !isPendingRow(r));
-  const site = firstDoc?.siteName ?? null;
-  const date = firstDoc?.expectedDate ? `поставка ${formatDateRu(firstDoc.expectedDate)}` : null;
-  const line = [parts.title, parts.numbers || null, site, date].filter(Boolean).join(' · ');
+  const summary = machineHeadSummary(head);
+  const agg = summary.aggregates;
+  const site = agg?.site.kind === 'same' ? (agg.site.row.siteName ?? null) : null;
+  const date = agg?.expectedDate ? `поставка ${formatDateRangeRu(agg.expectedDate)}` : null;
+  const line = [summary.title, summary.numbersFull || null, site, date].filter(Boolean).join(' · ');
   return (
-    <Space size={12} wrap={wrap} style={wrap ? undefined : { whiteSpace: 'nowrap' }}>
+    <Space size={12} wrap>
       <Typography.Text strong>{line}</Typography.Text>
-      <Typography.Text type="secondary">{parts.origin}</Typography.Text>
-      {parts.found && <Tag>{parts.found}</Tag>}
-      {parts.accepted && <Tag color="green">{parts.accepted}</Tag>}
-      {parts.merged && canUnmerge && (
-        <span onClick={stop}>
-          <Popconfirm
-            title="Разъединить машину?"
-            description="Все отправки вернутся в исходные машины, на планшете снова будут отдельные карточки"
-            okText="Разъединить"
-            cancelText="Отмена"
-            onConfirm={onUnmerge}
-          >
-            <Button size="small" icon={<UngroupOutlined />} loading={unmerging}>
-              Разъединить
-            </Button>
-          </Popconfirm>
-        </span>
+      {summary.origin && <Typography.Text type="secondary">{summary.origin}</Typography.Text>}
+      {summary.found && <Tag>{summary.found}</Tag>}
+      {summary.accepted && <Tag color="green">{summary.accepted.full}</Tag>}
+      {summary.merged && canUnmerge && (
+        <UnmergeButton onUnmerge={onUnmerge} unmerging={unmerging} />
       )}
     </Space>
   );

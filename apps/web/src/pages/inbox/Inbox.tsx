@@ -1,5 +1,5 @@
 import type { MouseEvent } from 'react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Button,
@@ -30,15 +30,19 @@ import {
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { MachineMergeResponse, SourceDocument } from '@matcheck/contracts';
 import { clusterRowsByGroup } from '../../shared/ui/documentGroupRows';
-import { isGroupHead, useCollapsedGroups, withGroupRows } from '../../shared/ui/groupRows';
+import { isGroupHead, useCollapsedGroups, withGroupRowCells } from '../../shared/ui/groupRows';
 import { GroupBracketStyle, GroupToggle, gutterCellClass } from '../../shared/ui/GroupGutter';
 import {
   buildMachineRows,
   documentsCount,
   MACHINE_GROUPS_COLLAPSED_KEY,
+  machineHeadSummary,
   type MachineHeadRow,
+  type MachineHeadSummary,
 } from './machineGroupRows';
 import { MachineGroupHeader } from './MachineGroupHeader';
+import { machineHeadCell, type MachineHeadActions } from './MachineGroupHeadCells';
+import { isUnrecognized } from './unrecognizedRow';
 import { MachineMergeModal } from './MachineMergeModal';
 import {
   mergeEnabledFor,
@@ -160,25 +164,6 @@ function KindTag({ kind }: { kind: Row['kind'] }) {
     return <Tag color="purple">Накладная</Tag>;
   }
   return <Tag color="gold">Заявка</Tag>;
-}
-
-/**
- * Файл, по которому документ заведён пустым — только чтобы он не исчез из виду;
- * ни номера, ни позиций в нём нет, а тип неизвестен, и «УПД» в колонке «Тип»
- * было бы враньём.
- *
- * Накладной, которую не смог прочитать парсер, здесь нет: её тип известен из
- * классификации, и тег «Накладная» для неё правдив.
- */
-function isUnrecognized(row: Pick<Row, 'parseErrorCode'>): boolean {
-  // По коду, а не по статусу: закрытый вручную файл уходит в архив, но код при
-  // нём остаётся (по нему запись не уезжает на планшет и не попадает в
-  // «Ожидаемые») — тип у неё так и остался неизвестным.
-  return (
-    row.parseErrorCode === 'unrecognized_type' ||
-    row.parseErrorCode === 'supplementary' ||
-    row.parseErrorCode === 'not_processed'
-  );
 }
 
 /** Подсказка под тегом «не распознано»: у каждой заглушки своя причина. */
@@ -479,6 +464,14 @@ const DOCUMENTS_FILTER_KEYS = [
   'expFrom',
   'expTo',
 ] as const;
+
+/**
+ * Что снимает «Сбросить»: фильтры, сортировку по колонке и страницу. Меню
+ * сортировку помнит (listMemory.sectionUrl), поэтому вернуть обычный порядок
+ * «свежие сверху» можно только здесь — и кнопка обязана быть активной, даже
+ * когда кроме сортировки ничего не задано.
+ */
+const DOCUMENTS_RESET_KEYS = [...DOCUMENTS_FILTER_KEYS, 'sort', 'order', 'page'] as const;
 
 export default function InboxPage() {
   const [params, setParams] = useSearchParams();
@@ -886,7 +879,10 @@ export default function InboxPage() {
   // того же окна limit/offset, поэтому строк на странице ровно pageSize и
   // таблица ничего не срезает.
   const groupedItems = useMemo(
-    () => clusterRowsByGroup([...pendingRows, ...filteredItems]),
+    // Место поставки задаёт её документ, а не принятый файл: файлы идут в
+    // начале, и застрявший навсегда файл тянул бы наверх всю старую поставку.
+    // То же правило у сервера (group-paging.ts).
+    () => clusterRowsByGroup([...pendingRows, ...filteredItems], (r) => !isPendingRow(r)),
     [pendingRows, filteredItems],
   );
   // Поставки скобкой «−/+», как группы приёмок в «Принятых»: строка поставки
@@ -898,6 +894,18 @@ export default function InboxPage() {
     () => buildMachineRows(groupedItems, collapsedMachines),
     [groupedItems, collapsedMachines],
   );
+  // Сводка строки поставки нужна каждой её ячейке — считаем раз на строку.
+  const machineSummaryOf = useMemo(() => {
+    const cache = new WeakMap<MachineHeadRow, MachineHeadSummary>();
+    return (head: MachineHeadRow): MachineHeadSummary => {
+      let summary = cache.get(head);
+      if (!summary) {
+        summary = machineHeadSummary(head);
+        cache.set(head, summary);
+      }
+      return summary;
+    };
+  }, []);
 
   // Префетч позиций — фоном после рендера списка. Клик «+» раскрывает
   // строку, дёргать сеть в этот момент не приходится: ExpandedSource-
@@ -905,8 +913,6 @@ export default function InboxPage() {
   usePrefetchSourceDocumentDetails(useMemo(() => filteredItems.map((r) => r.id), [filteredItems]));
 
   // Массовое удаление: чекбоксы слева, bulk action bar поверх таблицы.
-  // Выбор сбрасывается при смене вкладки direction (через зависимость в
-  // queryKey list — он получит другой набор items).
   // Раскрытие строк (показ позиций документа под шапкой). Lazy fetch
   // через ExpandedSourceDocumentItems → useQuery, кеш react-query.
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
@@ -914,6 +920,17 @@ export default function InboxPage() {
     setExpandedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const bulk = useBulkSelection<TableRow>((r) => r.id);
+  // Новая выдача — новый выбор. Отметки живут вне строк (preserveSelectedRowKeys),
+  // и без этого документ, отмеченный на третьей странице, оставался выбранным
+  // после «Сбросить», смены фильтра или перехода через меню (страница при нём
+  // не размонтируется) — и уходил в «Удалить выбранные» невидимым. В listQuery
+  // все параметры адреса, которые читает страница; рефетч той же выдачи (после
+  // удаления, по событию) ключ не меняет и выбор не трогает.
+  const listQueryKey = JSON.stringify(listQuery);
+  const clearSelection = bulk.clear;
+  useEffect(() => {
+    clearSelection();
+  }, [listQueryKey, clearSelection]);
   // Свернуть поставку — значит и снять отметки со скрытых документов:
   // невидимое не должно уйти в массовое действие.
   const toggleMachineGroup = (head: MachineHeadRow) => {
@@ -1202,19 +1219,20 @@ export default function InboxPage() {
   // принятых файлов над таблицей.
   // Карточка строки для мобильного вида — общая у списка и у блока
   // принятых файлов над ним.
-  // Строка поставки: текст сводки и «Разъединить» у объединённой машины.
-  const renderMachineHead = (head: MachineHeadRow, wrap = false) => {
+  // Строка поставки: «Разъединить» у объединённой машины — если объединение
+  // включено на её объекте и есть право правки.
+  const machineHeadActions = (head: MachineHeadRow): MachineHeadActions => {
     const siteId = head.group.members.find((r) => !isPendingRow(r))?.siteId ?? null;
-    return (
-      <MachineGroupHeader
-        head={head}
-        canUnmerge={canEditDocs && mergeEnabledFor(mergeConfig.data, siteId)}
-        onUnmerge={() => void unmergeHead(head)}
-        unmerging={unmerge.isPending}
-        wrap={wrap}
-      />
-    );
+    return {
+      canUnmerge: canEditDocs && mergeEnabledFor(mergeConfig.data, siteId),
+      onUnmerge: () => void unmergeHead(head),
+      unmerging: unmerge.isPending,
+    };
   };
+  // В карточке узкого экрана колонок нет — сводка одной надписью.
+  const renderMachineHead = (head: MachineHeadRow) => (
+    <MachineGroupHeader head={head} {...machineHeadActions(head)} />
+  );
   const documentCardRender = (r: Row) => (
     <Card style={{ width: '100%' }} size="small">
       <Space direction="vertical" size={2} style={{ width: '100%', position: 'relative' }}>
@@ -1553,13 +1571,12 @@ export default function InboxPage() {
             <ListFilters
               value={{ ...filters, supplierIds: supplierIdsShown }}
               onChange={updateFilters}
-              // Все фильтры разом; вкладка (направление) и сортировка остаются.
+              // Все фильтры, сортировка по колонке и страница разом — обратно к
+              // «свежие сверху». Остаётся только вкладка (направление).
               onReset={() =>
-                updateParams(
-                  Object.fromEntries([...DOCUMENTS_FILTER_KEYS, 'page'].map((k) => [k, null])),
-                )
+                updateParams(Object.fromEntries(DOCUMENTS_RESET_KEYS.map((k) => [k, null])))
               }
-              resetDisabled={!DOCUMENTS_FILTER_KEYS.some((key) => params.has(key))}
+              resetDisabled={!DOCUMENTS_RESET_KEYS.some((key) => params.has(key))}
               // Подрядчик: только поиск (справочные фильтры не нужны и закрыты).
               fields={isContractor ? ['q'] : ['contractor', 'supplier', 'site', 'q']}
               contractorOptions={contractorOptions}
@@ -1691,12 +1708,11 @@ export default function InboxPage() {
                   ...bulk.selection,
                   // Массовое удаление относится к документам. У принятого файла
                   // документа ещё нет — удалять нечего, чекбокс неактивен.
-                  // Строку поставки выбрать нельзя: её ячейку выбора закрывает
-                  // растянутая первая колонка.
+                  // У строки поставки чекбокса нет вовсе: выбирать в ней нечего.
                   getCheckboxProps: (r: TableRow) => ({
                     disabled: isGroupHead(r) || isPendingRow(r),
                   }),
-                  onCell: (r: TableRow) => (isGroupHead(r) ? { colSpan: 0 } : {}),
+                  renderCell: (_checked, r, _index, node) => (isGroupHead(r) ? null : node),
                 }
           }
           rowClassName={(r) => (isGroupHead(r) ? 'mc-group-head' : '')}
@@ -1720,9 +1736,16 @@ export default function InboxPage() {
             if (isPendingRow(r)) return;
             setSelectedId(r.id);
           }}
-          columns={withGroupRows<Row, MachineHeadRow>(documentColumns ?? [], renderMachineHead, {
-            selectionCell: !isContractor,
-          })}
+          // Строка поставки — по колонкам таблицы: «Тип» — сколько документов,
+          // «Статус» — принята ли, «№» — номера, даты, объект, стороны, итог.
+          columns={withGroupRowCells<Row, MachineHeadRow>(documentColumns ?? [], (head, cell) =>
+            machineHeadCell(
+              machineSummaryOf(head),
+              cell.key,
+              cell.renderAs,
+              machineHeadActions(head),
+            ),
+          )}
           cardRender={(r: TableRow) =>
             isGroupHead(r) ? (
               <Card size="small" style={{ width: '100%', background: '#f5f7fa' }}>
@@ -1731,7 +1754,7 @@ export default function InboxPage() {
                     collapsed={(r as MachineHeadRow).collapsed}
                     onToggle={() => toggleMachineGroup(r as MachineHeadRow)}
                   />
-                  {renderMachineHead(r as MachineHeadRow, true)}
+                  {renderMachineHead(r as MachineHeadRow)}
                 </Space>
               </Card>
             ) : (

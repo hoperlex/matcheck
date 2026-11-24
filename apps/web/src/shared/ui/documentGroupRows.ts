@@ -36,34 +36,48 @@ export function documentGroupKey(row: {
  * уже отсортированный по дате, остаётся отсортированным — просто разорванная
  * машина собирается вместе.
  *
+ * `isAnchor` — какие строки вправе задавать место кластера. В «Документах»
+ * это документы, а не принятые файлы: файлы идут в начале списка, и застрявший
+ * навсегда файл иначе тянул бы наверх всю старую поставку. Кластер без якорных
+ * строк стоит на месте своей первой строки. Без предиката якорь — любая строка.
+ * Правило то же, что у сервера (apps/api/.../group-paging.ts): иначе страница
+ * собралась бы одним порядком, а нарисовалась другим.
+ *
  * Возвращает НОВЫЙ массив. Мутировать вход нельзя: сюда приходит массив из
  * кэша React Query, и `.sort()` по месту рассинхронизировал бы кэш с сервером.
  */
 export function clusterRowsByGroup<T extends { groupId?: string | null; portalGroupId?: string | null }>(
   rows: readonly T[],
+  isAnchor?: (row: T) => boolean,
 ): T[] {
-  const clusters = new Map<string, T[]>();
-  const order: Array<{ groupId: string | null; row: T }> = [];
+  // Запись — одиночная строка или кластер; place — позиция в исходном списке.
+  type Entry = { place: number; rows: T[]; anchored: boolean };
+  const clusters = new Map<string, Entry>();
+  const entries: Entry[] = [];
 
-  for (const row of rows) {
+  rows.forEach((row, index) => {
     const groupId = documentGroupKey(row);
     if (!groupId) {
-      order.push({ groupId: null, row });
-      continue;
+      entries.push({ place: index, rows: [row], anchored: true });
+      return;
     }
+    const anchor = isAnchor ? isAnchor(row) : true;
     const existing = clusters.get(groupId);
     if (existing) {
-      existing.push(row);
-      continue;
+      existing.rows.push(row);
+      if (anchor && !existing.anchored) {
+        existing.place = index;
+        existing.anchored = true;
+      }
+      return;
     }
-    clusters.set(groupId, [row]);
-    // Место кластера — там, где встретился его первый документ.
-    order.push({ groupId, row });
-  }
+    const entry: Entry = { place: index, rows: [row], anchored: anchor };
+    clusters.set(groupId, entry);
+    entries.push(entry);
+  });
 
-  return order.flatMap((entry) =>
-    entry.groupId === null ? [entry.row] : (clusters.get(entry.groupId) ?? [entry.row]),
-  );
+  // Места различны (у каждой записи — индекс своей строки): порядок однозначен.
+  return entries.sort((a, b) => a.place - b.place).flatMap((entry) => entry.rows);
 }
 
 /**

@@ -225,10 +225,19 @@ function withGlobalFilters(url: string): string {
 /**
  * Куда вести пунктом меню: последнее место внутри раздела вместе с фильтрами.
  * Без памяти — `fallback` (по умолчанию сам корень раздела).
+ *
+ * Страницу меню НЕ восстанавливает: заходя в раздел, человек ждёт свежее
+ * сверху, а запомненная третья страница прятала новые документы (жалоба
+ * 24.11). Фильтры и выбранная сортировка по колонке сохраняются — это выбор
+ * человека, вернуть обычный порядок можно «Сбросить». Вкладки и «назад к
+ * списку» (pageUrl) страницу по-прежнему помнят.
  */
 export function sectionUrl(root: string, fallback: string = root): string {
   const memory = loadCurrent();
-  return withGlobalFilters(memory?.lastInSection[root] ?? fallback);
+  const [pathname = root, search = ''] = (memory?.lastInSection[root] ?? fallback).split('?');
+  const params = new URLSearchParams(search);
+  params.delete('page');
+  return withGlobalFilters(buildUrl(pathname, params));
 }
 
 /**

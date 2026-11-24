@@ -60,6 +60,15 @@ export function GroupBracketStyle() {
 .mc-group-toggle:hover { border-color: #1677ff; color: #1677ff; }
 .mc-rt tr.mc-group-head > td { background: #f5f7fa; }
 .mc-rt tr.mc-group-head:hover > td { background: #eef2f7 !important; }
+/* Строка группы по колонкам (withGroupRowCells): перенос вместо «…» — в
+   «Статусе» поставки столбик тегов с кнопкой, и обрезка съела бы кнопку.
+   Префикс тот же, что у общего правила nowrap (TableLookStyle), плюс классы
+   строки и ячейки — вес выше, перебивает его без !important. Длинные имена и
+   номера обрезают свои компоненты (Typography с ellipsis, partyCell). */
+.ant-table-wrapper.mc-rt .ant-table-tbody > tr.ant-table-row.mc-group-head > td.mc-group-cell {
+  white-space: normal;
+  text-overflow: clip;
+}
 `}</style>
   );
 }

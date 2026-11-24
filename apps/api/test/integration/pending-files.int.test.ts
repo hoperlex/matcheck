@@ -374,6 +374,39 @@ suite('принятые файлы в списке документов (реа�
     expect((await list()).pendingFiles ?? []).toHaveLength(0);
   });
 
+  it('застрявший файл старой поставки не поднимает её над свежими документами', async () => {
+    // Бой 24.11: файл «не загружен» из сентябрьской поставки висит в ожидающих
+    // вечно, а файлы идут в списке перед документами. Пока место поставки
+    // задавала её первая строка, файл тянул наверх всю старую поставку вместе
+    // с документом, и свежие уезжали вниз.
+    const old = randomUUID();
+    await bundle(old);
+    await registryRow(old, { filename: 'B+.png', order: 0, s3Key: null, status: 'failed' });
+    const oldDoc = randomUUID();
+    await sql`INSERT INTO source_documents
+        (id, kind, is_technical, direction, origin, status, site_id, parsed_at,
+         doc_number, doc_date, total_sum, bundle_id)
+      VALUES (${oldDoc}, 'upd', false, 'inbound', 'manual_pdf', 'parsed', ${siteId},
+              now() - interval '60 days', '26/0911-18', now() - interval '60 days', 100, ${old})`;
+    await sql`INSERT INTO source_document_attachments (source_document_id, s3_key, filename, role)
+              VALUES (${oldDoc}, 's3/old-upd.pdf', 'doc.pdf', 'original')`;
+    const fresh: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const b = randomUUID();
+      await bundle(b);
+      fresh.push(await documentFor(b, `s3/fresh-${i}.pdf`));
+    }
+
+    // Страница на две строки: на первой — оба свежих документа.
+    const p1 = await page(2, 0);
+    const p2 = await page(2, 2);
+    expect(new Set(p1.items.map((i) => i.id))).toEqual(new Set(fresh));
+    expect(p1.pendingFiles?.length ?? 0).toBe(0);
+    // Старая поставка — целиком на второй: документ и файл внутри неё.
+    expect(p2.items.map((i) => i.id)).toEqual([oldDoc]);
+    expect(p2.pendingFiles?.map((f) => f.key)).toHaveLength(1);
+  });
+
   it('файлы и документы делят одно окно страницы — ничего не теряется и не двоится', async () => {
     // Раньше файлы приходили СВЕРХ лимита: на странице оказывалось больше строк,
     // чем помещается, и таблица срезала ровно столько документов, сколько

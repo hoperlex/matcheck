@@ -8,9 +8,9 @@
  * снятыми. Тест держит именно это: адрес после ввода номера сохраняет объект,
  * подрядчика и поставщика.
  */
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate, type NavigateFunction } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useEffect, type ReactElement } from 'react';
 
@@ -41,6 +41,8 @@ const apiState = vi.hoisted(() => ({
   // Адреса запросов: пока мок их игнорировал, список мог растерять половину
   // параметров, и ни один тест этого не замечал.
   urls: [] as string[],
+  // Где включено объединение машин — от него зависит «Разъединить».
+  mergeConfig: { enabledSites: [] as string[] },
 }));
 
 vi.mock('../../services/api', () => ({
@@ -58,6 +60,7 @@ vi.mock('../../services/api', () => ({
       if (url.startsWith('/suppliers')) {
         return { items: [{ id: SUPPLIER_ID, name: 'ООО «Лютик»' }], total: 1 };
       }
+      if (url === '/source-documents/machine-merge/config') return apiState.mergeConfig;
       return apiState.response;
     },
     post: async () => ({ ok: true }),
@@ -74,10 +77,13 @@ const { useGlobalFiltersStore } = await import('../../stores/globalFilters');
 let search = '';
 /** Сколько раз менялся адрес: одно «Применить» обязано дать ровно одно изменение. */
 let urlChanges = 0;
+/** Переход внутри открытой страницы — как пункт меню, без размонтирования. */
+let navigateTo: NavigateFunction = () => undefined;
 
 function UrlSpy(): null {
   const location = useLocation();
   search = location.search;
+  navigateTo = useNavigate();
   useEffect(() => {
     urlChanges += 1;
   }, [location.key]);
@@ -113,6 +119,7 @@ afterEach(async () => {
   lastClient = null;
   apiState.response = { items: [], total: 0 };
   apiState.urls = [];
+  apiState.mergeConfig = { enabledSites: [] };
   // «Липкие» фильтры раздела живут в общем хранилище: без сброса объект из
   // соседнего кейса подставлялся бы в пустой адрес следующего.
   useGlobalFiltersStore.getState().reset();
@@ -467,5 +474,229 @@ describe('Документы: воронки в шапке — те же фил�
     fireEvent.click(within(dialog).getByRole('button', { name: 'Применить' }));
     await waitFor(() => expect(search).toContain('q=%D0%A3%D0%A2-43'));
     await expectListRequest({ q: 'УТ-43' });
+  });
+});
+
+/** Документ списка: минимум полей, остальное пустое. */
+function listDoc(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    kind: 'upd',
+    direction: 'inbound',
+    status: 'parsed',
+    origin: 'manual_pdf',
+    docNumber: `Д-${id}`,
+    docDate: '2026-11-23',
+    expectedDate: '2026-11-24',
+    totalSum: '1000.00',
+    vatSum: null,
+    supplierId: null,
+    supplierName: null,
+    contractorId: null,
+    contractorName: null,
+    recipientId: null,
+    recipientName: null,
+    recipientMolId: null,
+    recipientMolName: null,
+    siteId: SITE_ID,
+    siteName: 'ЖК ДОМ 56',
+    llmProviderId: null,
+    llmConfidence: null,
+    parsedAt: '2026-11-24T08:53:00.000Z',
+    queuedAt: null,
+    processedAt: null,
+    parseErrorCode: null,
+    parseErrorDetails: null,
+    originalFilename: null,
+    contentHash: null,
+    jobAttempts: 0,
+    version: 1,
+    createdAt: '2026-11-24T08:53:00.000Z',
+    updatedAt: '2026-11-24T08:53:00.000Z',
+    validation: null,
+    ...over,
+  };
+}
+
+/** Верхняя «Сбросить» — в панели фильтров (у воронок колонок своя, в окне). */
+function resetButton(): HTMLButtonElement {
+  return screen.getByRole('button', { name: /Сбросить/ }) as HTMLButtonElement;
+}
+
+/** Отметить галочкой строку документа с этим номером. */
+function selectRow(docNumber: string): void {
+  const row = screen.getByText(docNumber).closest('tr')!;
+  fireEvent.click(row.querySelector('.ant-table-selection-column input')!);
+}
+
+describe('Документы: «Сбросить» возвращает «свежие сверху»', () => {
+  it('при одной сортировке кнопка активна и снимает сортировку и страницу', async () => {
+    renderPage('/documents?direction=inbound&sort=docDate&order=asc&page=3');
+    await expectListRequest({ sort: 'docDate', order: 'asc' });
+
+    await waitFor(() => expect(resetButton().disabled).toBe(false));
+    fireEvent.click(resetButton());
+
+    await waitFor(() => expect(search).not.toContain('sort='));
+    expect(search).not.toContain('order=');
+    expect(search).not.toContain('page=');
+    expect(search).toContain('direction=inbound');
+  });
+
+  it('без фильтров, сортировки и страницы кнопка неактивна', async () => {
+    renderPage('/documents?direction=inbound');
+    await expectListRequest({ direction: 'inbound' });
+    expect(resetButton().disabled).toBe(true);
+  });
+});
+
+describe('Документы: выбор галочками не переживает смену выдачи', () => {
+  const twoDocs = () => {
+    apiState.response = {
+      items: [listDoc('a1', { docNumber: 'А-1' }), listDoc('a2', { docNumber: 'А-2' })],
+      total: 2,
+    };
+  };
+
+  it('«Сбросить» снимает выбор — невидимое не уйдёт в «Удалить выбранные»', async () => {
+    twoDocs();
+    renderPage('/documents?direction=inbound&page=3');
+    await screen.findByText('А-1');
+    selectRow('А-1');
+    expect(await screen.findByText('Удалить выбранные')).toBeTruthy();
+
+    fireEvent.click(resetButton());
+
+    await waitFor(() => expect(search).not.toContain('page='));
+    await waitFor(() => expect(screen.queryByText('Удалить выбранные')).toBeNull());
+  });
+
+  it('переход через меню без размонтирования страницы снимает выбор', async () => {
+    twoDocs();
+    renderPage('/documents?direction=inbound&page=3');
+    await screen.findByText('А-1');
+    selectRow('А-1');
+    expect(await screen.findByText('Удалить выбранные')).toBeTruthy();
+
+    // Меню ведёт на тот же маршрут — страница остаётся смонтированной.
+    act(() => navigateTo('/documents?direction=inbound'));
+
+    await waitFor(() => expect(search).not.toContain('page='));
+    await waitFor(() => expect(screen.queryByText('Удалить выбранные')).toBeNull());
+  });
+
+  it('фильтр над таблицей снимает выбор', async () => {
+    twoDocs();
+    renderPage('/documents?direction=inbound');
+    await screen.findByText('А-1');
+    selectRow('А-1');
+    expect(await screen.findByText('Удалить выбранные')).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText('Номер документа'), { target: { value: 'А-2' } });
+
+    await waitFor(() => expect(search).toContain('q='), { timeout: 2000 });
+    await waitFor(() => expect(screen.queryByText('Удалить выбранные')).toBeNull());
+  });
+
+  it('обновление той же выдачи выбор не трогает', async () => {
+    twoDocs();
+    renderPage('/documents?direction=inbound');
+    await screen.findByText('А-1');
+    selectRow('А-1');
+    expect(await screen.findByText('Удалить выбранные')).toBeTruthy();
+
+    await act(async () => {
+      await lastClient?.invalidateQueries({ queryKey: ['source-documents'] });
+    });
+
+    expect(screen.getByText('Удалить выбранные')).toBeTruthy();
+  });
+});
+
+/** Ячейка строки поставки в колонке с этой подписью (последней, если их две — «№»). */
+function groupCell(title: string): HTMLElement {
+  const ths = Array.from(document.querySelectorAll<HTMLElement>('.ant-table-thead th'));
+  const index = ths.map((th) => th.textContent?.trim()).lastIndexOf(title);
+  if (index < 0) throw new Error(`нет колонки «${title}»`);
+  const head = document.querySelector<HTMLElement>('.ant-table-tbody tr.mc-group-head');
+  if (!head) throw new Error('нет строки поставки');
+  return head.children[index] as HTMLElement;
+}
+
+describe('Документы: строка поставки по колонкам', () => {
+  const M = 'dddddddd-0000-0000-0000-000000000001';
+
+  it('значения поставки — в своих колонках, без «без номера» и «одной отправкой»', async () => {
+    const machine = { id: M, documentCount: 2, uploadCount: 1, deliveryNumbers: [27275] };
+    apiState.response = {
+      items: [
+        listDoc('t1', {
+          portalGroupId: M,
+          machine,
+          docNumber: 'ТП-7724',
+          buyerName: 'ООО "ЭЛЕВЕЛ"',
+          buyerInn: '7720298746',
+          totalSum: '1500.00',
+          vatSum: '0.00',
+        }),
+        listDoc('t2', {
+          portalGroupId: M,
+          machine,
+          docNumber: null,
+          docDate: null,
+          status: 'archived',
+          parseErrorCode: 'supplementary',
+          originalFilename: 'IMG_20261124.jpg',
+          totalSum: null,
+        }),
+      ],
+      total: 2,
+    };
+    renderPage('/documents?direction=inbound');
+    await screen.findByText('IMG_20261124.jpg');
+
+    expect(groupCell('Тип').textContent).toBe('2 документа');
+    expect(groupCell('Статус').textContent).toContain('Принята: приёмка 27275');
+    expect(groupCell('№').textContent).toBe('ТП-7724');
+    expect(groupCell('Объект').textContent).toBe('ЖК ДОМ 56');
+    expect(groupCell('Дата поставки').textContent).toBe('24.11.2026');
+    expect(groupCell('Покупатель').textContent).toContain('ЭЛЕВЕЛ');
+    expect(groupCell('Сумма').textContent).toContain('1');
+    expect(groupCell('Сумма НДС').textContent).toMatch(/^0,00/);
+    const head = document.querySelector('.ant-table-tbody tr.mc-group-head')!;
+    expect(head.textContent).not.toContain('без номера');
+    expect(head.textContent).not.toContain('одной отправкой');
+    // Строку поставки выбрать нельзя — чекбокса в ней нет.
+    expect(head.querySelector('.ant-table-selection-column input')).toBeNull();
+  });
+
+  it('принятая объединённая машина под фильтром: столбик статуса, обобщений нет', async () => {
+    apiState.mergeConfig = { enabledSites: ['*'] };
+    const machine = { id: M, documentCount: 3, uploadCount: 2, deliveryNumbers: [27275] };
+    apiState.response = {
+      items: [
+        listDoc('m1', { portalGroupId: M, machine, docNumber: 'УТ-1', totalSum: '10.00' }),
+        listDoc('m2', { portalGroupId: M, machine, docNumber: 'УТ-2', totalSum: '20.00' }),
+      ],
+      total: 2,
+    };
+    renderPage(`/documents?direction=inbound&supplier=${SUPPLIER_ID}`);
+    await screen.findByText('УТ-1');
+
+    // «найдено 2 из 3» — про количество, под «3 документа».
+    expect(groupCell('Тип').textContent).toBe('3 документанайдено 2 из 3');
+    const status = groupCell('Статус');
+    expect(status.textContent).toContain('Принята: приёмка 27275');
+    expect(status.textContent).toContain('объединена из 2 отправок');
+    await waitFor(() =>
+      expect(within(status).getByRole('button', { name: /Разъединить/ })).toBeTruthy(),
+    );
+    // Ячейка не режется в одну строку: кнопка не уедет за «…».
+    expect(status.classList.contains('mc-group-cell')).toBe(true);
+    // Под фильтром итог двух из трёх читался бы как итог поставки — пусто.
+    expect(groupCell('Сумма').textContent).toBe('');
+    expect(groupCell('Объект').textContent).toBe('');
+    expect(groupCell('Покупатель').textContent).toBe('');
+    expect(groupCell('№').textContent).toBe('УТ-1, УТ-2');
   });
 });

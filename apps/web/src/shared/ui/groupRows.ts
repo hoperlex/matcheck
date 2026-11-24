@@ -132,6 +132,62 @@ export function withGroupRows<T extends object, H extends object = KeyedGroupHea
   });
 }
 
+/** Класс ячеек строки группы в режиме «по колонкам»: им разрешён перенос. */
+export const GROUP_CELL_CLASS = 'mc-group-cell';
+
+export type GroupHeadCellContext<T> = {
+  /** `key` колонки (или её dataIndex), по нему строка группы выбирает содержимое. */
+  key: string;
+  /**
+   * Нарисовать ячейку этой колонки так, как у строки `row`. Общее значение
+   * группы (объект, сторона) выглядит тогда так же, как в строках под ней.
+   */
+  renderAs: (row: T) => ReactNode;
+};
+
+/**
+ * Колонки страницы со строкой группы, разложенной ПО КОЛОНКАМ: каждая колонка
+ * рисует свою ячейку строки группы (`headCell`), ничего не растягивается.
+ * Нужна, когда у группы есть что показать в колонках — у поставки в
+ * «Документах» это даты, объект, стороны, итог. Группы приёмок в «Принятых»
+ * остаются на `withGroupRows`.
+ *
+ * Как и там, `render` и `onCell` колонки строку группы не получают: rc-table
+ * зовёт `render` до проверки colSpan, и колонка, читающая `r.status.code`,
+ * упала бы на ней. Ячейкам строки группы — класс GROUP_CELL_CLASS: общий стиль
+ * таблицы режет ячейку в одну строку с «…», а в строке группы бывают
+ * многострочные ячейки с кнопками (см. GroupBracketStyle).
+ */
+export function withGroupRowCells<T extends object, H extends object = KeyedGroupHead<unknown>>(
+  columns: readonly Column<T>[],
+  headCell: (head: H, ctx: GroupHeadCellContext<T>) => ReactNode,
+): Column<T | H>[] {
+  return columns.map((col, index) => {
+    const original = col as {
+      key?: unknown;
+      dataIndex?: unknown;
+      render?: (value: unknown, record: T, i: number) => unknown;
+      onCell?: (record: T, i?: number) => object;
+    };
+    const dataIndex = typeof original.dataIndex === 'string' ? original.dataIndex : null;
+    const key = String(original.key ?? dataIndex ?? index);
+    const renderRow = (record: T, i: number, value?: unknown): ReactNode => {
+      const v =
+        value !== undefined || !dataIndex ? value : (record as Record<string, unknown>)[dataIndex];
+      return original.render ? (original.render(v, record, i) as ReactNode) : (v as ReactNode);
+    };
+    const render = (value: unknown, record: T | H, i: number): ReactNode =>
+      isGroupHead(record)
+        ? headCell(record as H, { key, renderAs: (row: T) => renderRow(row, i) })
+        : renderRow(record as T, i, value);
+    const onCell = (record: T | H, i?: number) => {
+      if (isGroupHead(record)) return { className: GROUP_CELL_CLASS };
+      return original.onCell ? original.onCell(record as T, i) : {};
+    };
+    return { ...col, render, onCell } as unknown as Column<T | H>;
+  });
+}
+
 const COLLAPSED_MAX = 300;
 
 function readCollapsed(storageKey: string): string[] {

@@ -51,7 +51,21 @@ describe('listMemory', () => {
     expect(q.get('tab')).toBe('accepted');
     expect(q.get('dfrom')).toBe('2026-11-01');
     expect(q.get('feature')).toBe('transit');
-    expect(q.get('page')).toBe('2');
+    // Страницу меню не восстанавливает: заходя в раздел, ждут свежее сверху.
+    expect(q.has('page')).toBe(false);
+  });
+
+  it('menu opens the first page but keeps the chosen column sort', () => {
+    // Решение 24.11: сортировка по колонке — выбор человека, её снимает
+    // «Сбросить», а не меню.
+    recordListUrl('/documents', '?direction=inbound&sort=docDate&order=asc&q=УПД&page=3');
+
+    const q = query(sectionUrl('/documents'));
+    expect(q.has('page')).toBe(false);
+    expect(q.get('sort')).toBe('docDate');
+    expect(q.get('order')).toBe('asc');
+    expect(q.get('q')).toBe('УПД');
+    expect(q.get('direction')).toBe('inbound');
   });
 
   it('without memory the menu leads to the fallback', () => {
@@ -65,7 +79,11 @@ describe('listMemory', () => {
     recordListUrl('/references/sites', '?q=мира');
     recordListUrl('/references/supplier-orders', '?status=approved&page=3');
 
-    expect(sectionUrl('/references')).toBe('/references/supplier-orders?status=approved&page=3');
+    expect(sectionUrl('/references')).toBe('/references/supplier-orders?status=approved');
+    // Вкладка внутри раздела страницу помнит.
+    expect(pageUrl('/references/supplier-orders')).toBe(
+      '/references/supplier-orders?status=approved&page=3',
+    );
     expect(pageUrl('/references/sites')).toBe('/references/sites?q=%D0%BC%D0%B8%D1%80%D0%B0');
   });
 
@@ -146,7 +164,9 @@ describe('listMemory', () => {
     it('keeps the page when the shared filters did not change', () => {
       useGlobalFiltersStore.getState().set({ siteIds: ['s1'] });
       recordListUrl('/operations', '?type=delivery&tab=accepted&site=s1&page=3');
-      expect(query(sectionUrl('/operations')).get('page')).toBe('3');
+      // Возврат на вкладку («назад к списку») страницу помнит, меню — нет.
+      expect(query(pageUrl('/operations')).get('page')).toBe('3');
+      expect(query(sectionUrl('/operations')).has('page')).toBe(false);
     });
 
     it('History gets site and contractor but never a supplier', () => {

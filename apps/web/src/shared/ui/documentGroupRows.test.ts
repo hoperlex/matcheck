@@ -31,6 +31,51 @@ describe('группировка строк документов', () => {
     expect(clusterRowsByGroup(rows).map((r) => r.id)).toEqual(['one', 'two', 'four', 'three']);
   });
 
+  describe('якорь кластера — документ, а не принятый файл', () => {
+    // Файлы идут в начале списка; документы — по дате, свежие сверху.
+    const file = (id: string, groupId: string) => ({ id, groupId, pending: true });
+    const doc = (id: string, groupId: string | null) => ({ id, groupId, pending: false });
+    const isDoc = (r: { pending: boolean }) => !r.pending;
+
+    it('застрявший файл старой поставки не поднимает её над свежими документами', () => {
+      const rows = [
+        file('lost', 'old'),
+        doc('fresh', 'f'),
+        doc('single', null),
+        doc('old-doc', 'old'),
+      ];
+
+      expect(clusterRowsByGroup(rows, isDoc).map((r) => r.id)).toEqual([
+        'fresh',
+        'single',
+        'lost',
+        'old-doc',
+      ]);
+    });
+
+    it('поставка из одних файлов остаётся на месте своей первой строки', () => {
+      const rows = [
+        file('incoming', 'new'),
+        file('lost', 'old'),
+        doc('fresh', 'f'),
+        doc('old-doc', 'old'),
+      ];
+
+      expect(clusterRowsByGroup(rows, isDoc).map((r) => r.id)).toEqual([
+        'incoming',
+        'fresh',
+        'lost',
+        'old-doc',
+      ]);
+    });
+
+    it('без предиката якорь — первая строка, как раньше', () => {
+      const rows = [file('lost', 'old'), doc('fresh', 'f'), doc('old-doc', 'old')];
+
+      expect(clusterRowsByGroup(rows).map((r) => r.id)).toEqual(['lost', 'old-doc', 'fresh']);
+    });
+  });
+
   it('входной массив не меняется', () => {
     const rows = [row('a', 'g1'), row('b', null), row('c', 'g1')];
     const before = [...rows];

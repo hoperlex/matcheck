@@ -68,6 +68,48 @@ describe('страница не разрывает поставку', () => {
     expect(page.map((r) => r.id)).toEqual(['doc-1', 'file-1', 'other']);
   });
 
+  it('застрявший файл старой поставки не поднимает её над свежими документами', () => {
+    // Как на бою 24.11: файлы идут во входе перед документами, а файл «не
+    // загружен» из сентябрьской поставки висит в ожидающих вечно.
+    const rows: GroupPagingRow[] = [
+      { id: 'lost-file', groupId: 'old', kind: 'pending' },
+      { id: 'fresh-1', groupId: 'fresh', kind: 'doc' },
+      { id: 'fresh-2', groupId: 'fresh2', kind: 'doc' },
+      { id: 'old-doc', groupId: 'old', kind: 'doc' },
+    ];
+    const { rows: page } = pageOfGroupedRows(rows, 1, 50);
+
+    // Старая поставка — на месте своего документа; файл — первым внутри неё.
+    expect(page.map((r) => r.id)).toEqual(['fresh-1', 'fresh-2', 'lost-file', 'old-doc']);
+  });
+
+  it('поставка без документов остаётся сверху — файлы приняты, разбор не дошёл', () => {
+    const rows: GroupPagingRow[] = [
+      { id: 'new-file', groupId: 'incoming', kind: 'pending' },
+      { id: 'lost-file', groupId: 'old', kind: 'pending' },
+      { id: 'fresh', groupId: 'fresh', kind: 'doc' },
+      { id: 'old-doc', groupId: 'old', kind: 'doc' },
+    ];
+    const { rows: page } = pageOfGroupedRows(rows, 1, 50);
+
+    expect(page.map((r) => r.id)).toEqual(['new-file', 'fresh', 'lost-file', 'old-doc']);
+  });
+
+  it('поставка с файлом встаёт по документу и не рвётся между страницами', () => {
+    // Файл старой поставки первым во входе, её документ — в самом конце.
+    const rows: GroupPagingRow[] = [
+      { id: 'lost-file', groupId: 'old', kind: 'pending' },
+      ...Array.from({ length: 4 }, (_, i) => group(`s${i}`, 1)).flat(),
+      { id: 'old-doc', groupId: 'old', kind: 'doc' },
+    ];
+    const p1 = pageOfGroupedRows(rows, 1, 4);
+    const p2 = pageOfGroupedRows(rows, 2, 4);
+
+    expect(p1.rows.map((r) => r.groupId)).toEqual(['s0', 's1', 's2', 's3']);
+    expect(p2.rows.map((r) => r.id)).toEqual(['lost-file', 'old-doc']);
+    expect(p2.rowOffset).toBe(4);
+  });
+
   it('ни одна строка не теряется и не задваивается между страницами', () => {
     const rows = [
       ...group('a', 3),
