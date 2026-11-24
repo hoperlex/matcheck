@@ -34,6 +34,7 @@ import {
   DispatcherBulkCheckResponseSchema,
   DispatcherCheckRequestSchema,
   ErrorResponseSchema,
+  GroupConflictSchema,
   type DispatcherBulkCheckResponse,
   ReviewRequestSchema,
   UnlinkSourceBodySchema,
@@ -1763,8 +1764,13 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
           // объекта (см. domain/operations/foreign-site.ts).
           403: ErrorResponseSchema,
           404: ErrorResponseSchema,
-          // 409 — либо OCC-конфликт (Conflict), либо pending_deletion (Error).
-          409: z.union([ConflictResponseSchema, ErrorResponseSchema]),
+          // 409 — OCC-конфликт (Conflict), typed-отказ протокола «одна машина —
+          // одна приёмка» (GroupConflict) или pending_deletion (Error).
+          // GroupConflict обязан стоять ДО Error: сериализатор отдаёт результат
+          // разбора схемой, а Error разобрал бы конфликт, выбросив groupId,
+          // claimedAt и claimedByOperationId, — планшет показал бы «машину уже
+          // оформил другой планшет» без времени.
+          409: z.union([ConflictResponseSchema, GroupConflictSchema, ErrorResponseSchema]),
           400: ErrorResponseSchema,
           422: ErrorResponseSchema,
         },
@@ -1836,6 +1842,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             // запись с планшета всегда приходит с уже сгенерированным UUID,
             // поэтому решает наличие строки в БД.
             await assertPermission(req, 'operations.deliveries', 'create');
+            // Контекст протокола «одна машина — одна приёмка» — обязательно и
+            // здесь: планшет создаёт приёмку ВСЕГДА этой веткой (офлайн-id).
+            // Без него занятие машины и 426 для старых сборок действовали бы
+            // только для портала. Typed-отказ ловит общий catch ниже.
             await createDelivery(
               app,
               input,
@@ -1844,6 +1854,11 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
               req.user?.sessionId ?? null,
               unitModeFor(req, input.statusCode),
               isMobileClient(req),
+              {
+                capabilities: requestCapabilities(req.headers, input.capabilities),
+                mobile: isMobileClient(req),
+                actorUserId: req.user?.id ?? null,
+              },
             );
           } else {
             await assertPermission(req, 'operations.deliveries', 'edit');
@@ -1930,6 +1945,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         });
         return dto;
       } catch (err) {
+        // Typed-отказ протокола из ветки создания с явным id (планшет) —
+        // телом 409 как есть, как и в ветке без id. Без этого он ушёл бы в 500,
+        // а 5xx планшет повторяет бесконечно вместо карантина.
+        if (err instanceof GroupConflictError) return reply.code(409).send(err.conflict);
         if (err instanceof InvalidManualEntryError) {
           return reply.code(400).send({ error: 'invalid_manual_entry', message: err.message });
         }
