@@ -19,6 +19,7 @@ export const ADMIN_TABS: { key: string; label: string; page: PageId }[] = [
   { key: '/admin/prompts', label: 'Промпты', page: 'admin.prompts' },
   { key: '/admin/edo-accounts', label: 'ЭДО', page: 'admin.edo_accounts' },
   { key: '/admin/mail-accounts', label: 'Почта', page: 'admin.mail_accounts' },
+  { key: '/admin/api-access', label: 'API-доступ', page: 'admin.api_access' },
   { key: '/admin/settings', label: 'Настройки', page: 'admin.settings' },
 ];
 

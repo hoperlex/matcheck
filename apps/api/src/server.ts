@@ -47,6 +47,7 @@ import { llmProviderRoutes } from './routes/admin/llm-providers.js';
 import { llmProviderCredentialRoutes } from './routes/admin/llm-provider-credentials.js';
 import { edoAccountRoutes } from './routes/admin/edo-accounts.js';
 import { mailAccountRoutes } from './routes/admin/mail-accounts.js';
+import { apiKeyRoutes } from './routes/admin/api-keys.js';
 import { mailReviewRoutes } from './routes/mail-review.js';
 import { userAdminRoutes } from './routes/admin/users.js';
 import { passwordResetAdminRoutes } from './routes/admin/password-resets.js';
@@ -149,6 +150,7 @@ export async function buildServer() {
   await app.register(llmProviderCredentialRoutes);
   await app.register(edoAccountRoutes);
   await app.register(mailAccountRoutes);
+  await app.register(apiKeyRoutes);
   await app.register(mailReviewRoutes);
   await app.register(userAdminRoutes);
   await app.register(passwordResetAdminRoutes);

@@ -19,8 +19,10 @@ export const logger = pino({
       // Машинный канал 1С: секрет учётки и выданный токен (OAuth-имена полей).
       'client_secret',
       'access_token',
+      'clientSecret',
       '*.client_secret',
       '*.access_token',
+      '*.clientSecret',
       '*.password',
       '*.token',
       'headers.authorization',

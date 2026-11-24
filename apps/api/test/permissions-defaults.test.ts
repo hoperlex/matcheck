@@ -277,7 +277,7 @@ describe('дефолтная матрица == сегодняшние права
       }
     }
     expect(bad).toEqual([]);
-    expect(PAGE_CATALOG).toHaveLength(25);
-    expect(new Set(PAGE_CATALOG.map((p) => p.id)).size).toBe(25);
+    expect(PAGE_CATALOG).toHaveLength(26);
+    expect(new Set(PAGE_CATALOG.map((p) => p.id)).size).toBe(26);
   });
 });

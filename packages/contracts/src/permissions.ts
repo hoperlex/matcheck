@@ -94,6 +94,7 @@ export const PAGE_IDS = [
   'admin.prompts',
   'admin.edo_accounts',
   'admin.mail_accounts',
+  'admin.api_access',
   'admin.settings',
 ] as const;
 
@@ -404,6 +405,13 @@ export const PAGE_CATALOG: PageCatalogEntry[] = [
     base: adminOnly,
   },
   {
+    id: 'admin.api_access',
+    group: 'admin',
+    label: 'API-доступ',
+    actions: CRUD,
+    base: adminOnly,
+  },
+  {
     id: 'admin.settings',
     group: 'admin',
     label: 'Настройки',
@@ -501,11 +509,17 @@ export function isLockedCell(role: ManagedRole, page: PageId, action: PageAction
  * пользователя принимает любую роль, включая admin, и позволяет сменить пароль
  * существующему администратору. Открывать это можно будет только вместе с
  * ограничениями делегата (не назначать admin, не трогать админов и себя).
+ *
+ * `admin.api_access` — машинные ключи внешних систем (1С). Ключ читает приёмки
+ * всех объектов и подтверждает их выгрузку: выдать его мог бы только тот, кому
+ * и без того положено видеть всё. Просмотр тоже закрыт — в списке client_id и
+ * сведения о том, откуда и когда ходит интеграция.
  */
 export const NEVER_GRANTABLE: ReadonlySet<string> = new Set<string>([
   ...PAGE_ACTIONS.map((action) => `admin.roles:${action}`),
   'admin.users:edit',
   'admin.users:delete',
+  ...PAGE_ACTIONS.map((action) => `admin.api_access:${action}`),
 ]);
 
 export function isNeverGrantable(page: PageId, action: PageAction): boolean {

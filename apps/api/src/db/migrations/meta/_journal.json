@@ -1093,6 +1093,13 @@
       "when": 1798427000000,
       "tag": "0156_counterparty_supplier_directory",
       "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1798513400000,
+      "tag": "0157_service_account_admin",
+      "breakpoints": true
     }
   ]
 }

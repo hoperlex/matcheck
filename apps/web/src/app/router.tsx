@@ -40,6 +40,7 @@ const AdminLlmProviders = lazy(() => import('../pages/admin/LlmProviders'));
 const AdminPrompts = lazy(() => import('../pages/admin/Prompts'));
 const AdminEdoAccounts = lazy(() => import('../pages/admin/EdoAccounts'));
 const AdminMailAccounts = lazy(() => import('../pages/admin/MailAccounts'));
+const AdminApiAccess = lazy(() => import('../pages/admin/ApiAccess'));
 const Settings = lazy(() => import('../pages/settings/Settings'));
 const ForgotPassword = lazy(() => import('../pages/auth/ForgotPassword'));
 const ResetPassword = lazy(() => import('../pages/auth/ResetPassword'));
@@ -411,6 +412,12 @@ export const router = sentryCreateBrowserRouter([
               <ProtectedRoute page="admin.mail_accounts">
                 {suspense(<AdminMailAccounts />)}
               </ProtectedRoute>
+            ),
+          },
+          {
+            path: 'api-access',
+            element: (
+              <ProtectedRoute page="admin.api_access">{suspense(<AdminApiAccess />)}</ProtectedRoute>
             ),
           },
           {

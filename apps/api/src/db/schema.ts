@@ -3317,6 +3317,13 @@ export const serviceAccounts = pgTable(
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     lastTokenAt: timestamp('last_token_at', { withTimezone: true }),
     lastTokenIp: varchar('last_token_ip', { length: 64 }),
+    // 0157 — вкладка «API-доступ».
+    description: text('description'),
+    /** NULL — бессрочно. Проверяется при выдаче токена и на каждом запросе. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    /** Последнее обращение с токеном; пишется не чаще раза в минуту. */
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

@@ -1016,6 +1016,13 @@ export const ROUTE_PERMISSIONS = new Map<string, RouteRule>([
     },
   ],
   ['POST /api/v1/admin/mail-accounts/:id/poll', st('admin.mail_accounts', 'edit')],
+  // Машинные ключи (1С). Страница в NEVER_GRANTABLE: матрица её никому не
+  // выдаёт, маршруты к тому же под authorize('admin').
+  ['GET /api/v1/admin/api-keys', st('admin.api_access', 'view')],
+  ['POST /api/v1/admin/api-keys', st('admin.api_access', 'create')],
+  ['PATCH /api/v1/admin/api-keys/:id', st('admin.api_access', 'edit')],
+  ['POST /api/v1/admin/api-keys/:id/rotate-secret', st('admin.api_access', 'edit')],
+  ['POST /api/v1/admin/api-keys/:id/revoke', st('admin.api_access', 'delete')],
 
   [
     'GET /api/v1/admin/settings',

@@ -50,6 +50,7 @@ export const NAV_ACCESS: Record<PageId, ManagedRole[]> = {
   'admin.prompts': [],
   'admin.edo_accounts': [],
   'admin.mail_accounts': [],
+  'admin.api_access': [],
   'admin.settings': [],
 };
 

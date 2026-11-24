@@ -22,14 +22,20 @@
  */
 import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { eq, sql as drSql } from 'drizzle-orm';
 import { db, sql } from '../src/db/client.js';
-import { serviceAccounts } from '../src/db/schema.js';
+import { authEvents, serviceAccounts } from '../src/db/schema.js';
 import {
+  createServiceAccount,
+  findServiceAccountByClientId,
   generateClientSecret,
   hashClientSecret,
-  KNOWN_SCOPES,
-  parseCidr,
+  revokeServiceAccount,
+  rotateServiceAccountSecret,
+  serviceAccountStatus,
+  ServiceAccountError,
+  updateServiceAccount,
+  validateCidrs,
+  validateScopes,
 } from '../src/domain/auth/service-accounts.js';
 import { errorChain } from '../src/lib/error-chain.js';
 
@@ -49,20 +55,13 @@ function fail(message: string): never {
 }
 
 function parseScopes(raw: string | undefined): string[] {
-  const scopes = (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (scopes.length === 0) fail('--scopes: хотя бы одно право');
-  const unknown = scopes.filter((s) => !(KNOWN_SCOPES as readonly string[]).includes(s));
-  if (unknown.length > 0) fail(`--scopes: неизвестные права ${unknown.join(', ')} (есть: ${KNOWN_SCOPES.join(', ')})`);
-  return [...new Set(scopes)];
+  return validateScopes((raw ?? '').split(',').map((s) => s.trim()).filter(Boolean));
 }
 
 function parseCidrs(raw: string | undefined): string[] | null {
   if (raw === undefined || raw.trim() === '' || raw.trim() === 'none') return null;
-  const list = raw.split(',').map((s) => s.trim()).filter(Boolean);
   // Тот же разбор, что на запросах: битая запись там означала бы отказ всем.
-  const bad = list.filter((c) => parseCidr(c) === null);
-  if (bad.length > 0) fail(`--cidr: не сеть ${bad.map((c) => `«${c}»`).join(', ')}`);
-  return list;
+  return validateCidrs(raw.split(','));
 }
 
 /** Секрет — в новый файл 600; в вывод — только длина и отпечаток. */
@@ -78,90 +77,88 @@ function clientId(): string {
   return id;
 }
 
+async function existing(id: string) {
+  const row = await findServiceAccountByClientId(db, id);
+  if (!row) fail(`учётки ${id} нет`);
+  return row;
+}
+
+/** Журнал — тот же, что у вкладки «API-доступ»; userId нет, источник — командная строка. */
+async function audit(tx: Parameters<Parameters<typeof db.transaction>[0]>[0], event: string, meta: Record<string, unknown>) {
+  await tx.insert(authEvents).values({ userId: null, event, meta: { ...meta, source: 'cli' } });
+}
+
 async function main(): Promise<number> {
   const command = positionals[0];
   switch (command) {
     case 'list': {
-      const rows = await db
-        .select({
-          clientId: serviceAccounts.clientId,
-          name: serviceAccounts.name,
-          scopes: serviceAccounts.scopes,
-          cidrs: serviceAccounts.allowedCidrs,
-          active: serviceAccounts.isActive,
-          gen: serviceAccounts.secretGeneration,
-          lastTokenAt: serviceAccounts.lastTokenAt,
-        })
-        .from(serviceAccounts)
-        .orderBy(serviceAccounts.clientId);
+      const rows = await db.select().from(serviceAccounts).orderBy(serviceAccounts.clientId);
       for (const r of rows) {
+        const last = [r.lastUsedAt, r.lastTokenAt].filter((d): d is Date => d !== null);
+        const lastAt = last.length ? new Date(Math.max(...last.map((d) => d.getTime()))).toISOString() : '—';
         console.info(
-          `${r.clientId}\t${r.active ? 'активна' : 'ОТОЗВАНА'}\tпоколение ${r.gen}\t${r.scopes.join(',')}\t` +
-            `сети: ${r.cidrs?.join(',') ?? 'любые'}\tпоследний токен: ${r.lastTokenAt?.toISOString() ?? '—'}\t${r.name}`,
+          `${r.clientId}\t${serviceAccountStatus(r)}\tпоколение ${r.secretGeneration}\t${r.scopes.join(',')}\t` +
+            `сети: ${r.allowedCidrs?.join(',') ?? 'любые'}\tдо: ${r.expiresAt?.toISOString() ?? 'бессрочно'}\t` +
+            `последний запрос: ${lastAt}\t${r.name}`,
         );
       }
       if (rows.length === 0) console.info('учёток нет');
       return 0;
     }
     case 'create': {
+      // Все проверки — до записи файла: ошибка в аргументах не оставляет файл.
       const id = clientId();
       const name = args.name?.trim() || fail('--name обязателен');
       const scopes = parseScopes(args.scopes);
       const cidrs = parseCidrs(args.cidr);
+      if (await findServiceAccountByClientId(db, id)) fail(`client_id «${id}» уже занят`);
       const secret = generateClientSecret();
-      // Сначала файл (wx — не перезаписывать чужой), потом строка: при сбое
-      // записи строки остаётся лишний файл, а не учётка без известного секрета.
+      // Сначала файл (wx — не перезаписывать чужой), потом строка: сбой записи
+      // файла не трогает базу; сбой базы оставляет лишний файл, а не учётку без
+      // известного секрета.
       const note = writeSecret(args['secret-out'], secret);
-      await db.insert(serviceAccounts).values({
-        clientId: id,
-        name,
-        scopes,
-        allowedCidrs: cidrs,
-        secretHash: hashClientSecret(secret),
+      await db.transaction(async (tx) => {
+        const row = await createServiceAccount(tx, { clientId: id, name, scopes, allowedCidrs: cidrs, secret });
+        await audit(tx, 'service_account_created', { clientId: row.clientId, name, scopes, allowedCidrs: cidrs });
       });
       console.info(`учётка ${id} создана: права ${scopes.join(',')}, сети ${cidrs?.join(',') ?? 'любые'}`);
       console.info(note);
       return 0;
     }
     case 'rotate-secret': {
-      const id = clientId();
+      const row = await existing(clientId());
       const secret = generateClientSecret();
+      // Тот же порядок: файл не записался — база не тронута, старый секрет работает.
       const note = writeSecret(args['secret-out'], secret);
-      const updated = await db
-        .update(serviceAccounts)
-        .set({
-          secretHash: hashClientSecret(secret),
-          secretGeneration: drSql`${serviceAccounts.secretGeneration} + 1`,
-          updatedAt: new Date(),
-        })
-        .where(eq(serviceAccounts.clientId, id))
-        .returning({ gen: serviceAccounts.secretGeneration });
-      if (updated.length === 0) fail(`учётки ${id} нет (файл с секретом создан зря — удалите его)`);
-      console.info(`учётка ${id}: секрет заменён, поколение ${updated[0]!.gen}; выданные токены больше не действуют`);
+      const updated = await db.transaction(async (tx) => {
+        const r = await rotateServiceAccountSecret(tx, row.id, { secret });
+        await audit(tx, 'service_account_secret_rotated', { clientId: r.clientId, generation: r.secretGeneration });
+        return r;
+      });
+      console.info(`учётка ${updated.clientId}: секрет заменён, поколение ${updated.secretGeneration}; выданные токены больше не действуют`);
       console.info(note);
       return 0;
     }
     case 'revoke': {
-      const id = clientId();
-      const updated = await db
-        .update(serviceAccounts)
-        .set({ isActive: false, revokedAt: new Date(), updatedAt: new Date() })
-        .where(eq(serviceAccounts.clientId, id))
-        .returning({ id: serviceAccounts.id });
-      if (updated.length === 0) fail(`учётки ${id} нет`);
-      console.info(`учётка ${id} отозвана: токены и выдача перестали работать`);
+      const row = await existing(clientId());
+      const { changed } = await db.transaction(async (tx) => {
+        const res = await revokeServiceAccount(tx, row.id);
+        if (res.changed) await audit(tx, 'service_account_revoked', { clientId: row.clientId });
+        return res;
+      });
+      console.info(changed ? `учётка ${row.clientId} отозвана: токены и выдача перестали работать` : `учётка ${row.clientId} уже была отозвана`);
       return 0;
     }
     case 'set-cidr': {
-      const id = clientId();
+      const row = await existing(clientId());
       const cidrs = parseCidrs(args.cidr);
-      const updated = await db
-        .update(serviceAccounts)
-        .set({ allowedCidrs: cidrs, updatedAt: new Date() })
-        .where(eq(serviceAccounts.clientId, id))
-        .returning({ id: serviceAccounts.id });
-      if (updated.length === 0) fail(`учётки ${id} нет`);
-      console.info(`учётка ${id}: сети ${cidrs?.join(',') ?? 'любые'}`);
+      await db.transaction(async (tx) => {
+        const res = await updateServiceAccount(tx, row.id, { allowedCidrs: cidrs });
+        if (res.changed.length > 0) {
+          await audit(tx, 'service_account_updated', { clientId: row.clientId, changed: res.changed, allowedCidrs: cidrs });
+        }
+      });
+      console.info(`учётка ${row.clientId}: сети ${cidrs?.join(',') ?? 'любые'}`);
       return 0;
     }
     default:
@@ -175,7 +172,7 @@ main()
     process.exitCode = code;
   })
   .catch((err) => {
-    console.error(errorChain(err));
+    console.error(err instanceof ServiceAccountError ? err.message : errorChain(err));
     process.exitCode = 1;
   })
   .finally(() => sql.end({ timeout: 5 }));
