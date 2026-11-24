@@ -11,7 +11,10 @@
  *   - чужая блокировка → понятная ошибка, ничего не записано;
  *   - откат по снимку возвращает как было;
  *   - склейка без файлов (--merges-only, --near-inn, --pairs): тот же путь
- *     записи и отката, повтор пуст.
+ *     записи и отката, повтор пуст;
+ *   - служебные строки поставщиков без ИНН (counterparties.supplier_directory_id,
+ *     0156) переезжают с дублем и возвращаются откатом; откат не удаляет запись,
+ *     на которую они ссылаются, и не разминается с одновременным выбором.
  *
  * Склейка работает по всей таблице suppliers, поэтому набор НЕ трогает общую
  * тестовую базу: на сервере TEST_DATABASE_URL создаётся своя база, на неё
@@ -36,6 +39,8 @@ import { extractBracketInn } from '../../src/domain/directories/names.js';
 import type { BillhubSupplier, OneCContractor } from '../../src/domain/directories/parse.js';
 import type { DirectoriesInput } from '../../src/domain/directories/plan.js';
 import { revertDirectoriesImport } from '../../src/domain/directories/revert.js';
+import { resolveSupplierCounterparty } from '../../src/domain/directories/supplier-counterparty.js';
+import { expandSupplierFilterIds } from '../../src/domain/directories/supplier-filter-groups.js';
 import { matchOrCreateSupplier } from '../../src/domain/sourceDocuments/supplierMatcher.js';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
@@ -94,6 +99,7 @@ suite('импорт справочников на PostgreSQL', () => {
     // Сид 0055 и данные прошлых тестов не нужны: склейка смотрит на всю таблицу.
     await sql`delete from source_documents`;
     await sql`update users set contractor_customer_id = null`;
+    await sql`delete from counterparties where supplier_directory_id is not null`;
     await sql`delete from suppliers`;
     await sql`delete from customer_counterparties`;
   });
@@ -496,5 +502,132 @@ suite('импорт справочников на PostgreSQL', () => {
     expect(after.docs.map((d) => [d.id, d.supplier_directory_id])).toEqual(
       before.docs.map((d) => [d.id, d.supplier_directory_id]),
     );
+  });
+
+  describe('служебные строки поставщиков без ИНН', () => {
+    const quiet = { info: () => {} };
+
+    /** Служебная строка, как её заводит выбор поставщика без ИНН. */
+    async function serviceRow(directoryId: string, name: string): Promise<string> {
+      const [row] = await sql<{ id: string }[]>`
+        insert into counterparties (inn, kpp, name, is_supplier, supplier_directory_id)
+        values (${`0000${randomUUID().slice(0, 8)}`}, null, ${name}, true, ${directoryId})
+        returning id`;
+      return row!.id;
+    }
+
+    async function linkOf(id: string): Promise<string | null> {
+      const [row] = await sql<{ supplier_directory_id: string | null }[]>`
+        select supplier_directory_id from counterparties where id = ${id}`;
+      return row!.supplier_directory_id;
+    }
+
+    it('склейка переносит строку на цель, фильтр по цели её находит, откат возвращает', async () => {
+      const target = await supplier({ name: 'АО "ИСТКУЛЬТ МОЖАЙСК"', inn: '5028021698' });
+      const source = await supplier({ name: 'ООО «МОЖАЙСК»', inn: '' });
+      const cp = await serviceRow(source, 'ООО «МОЖАЙСК»');
+
+      let snapshot: ImportSnapshot | null = null;
+      await applyWithConfirm(
+        { mergesOnly: true, pairs: [{ sourceId: source, targetId: target }] },
+        {
+          apply: true,
+          beforeWrite: async (s) => {
+            snapshot = s;
+          },
+        },
+      );
+      const snap = snapshot as ImportSnapshot | null;
+      expect(snap?.merges[0]?.sources[0]?.counterpartyIds).toEqual([cp]);
+      expect(await linkOf(cp)).toBe(target);
+      const scope = await expandSupplierFilterIds({ db } as never, [target]);
+      expect(scope.opIds).toContain(cp);
+
+      const r = await revertDirectoriesImport(db, snap!, { apply: true });
+      expect(r.plan.repoints.map((p) => p.counterpartyIds)).toEqual([[cp]]);
+      expect(await linkOf(cp)).toBe(source);
+    });
+
+    it('откат не удаляет вставленную импортом запись, на которую ссылается строка', async () => {
+      const newHub = hub({ name: 'ООО "БЕЗ ИНН"', innRaw: '' });
+      let snapshot: ImportSnapshot | null = null;
+      await applyWithConfirm(
+        { suppliers: [newHub] },
+        {
+          apply: true,
+          beforeWrite: async (s) => {
+            snapshot = s;
+          },
+        },
+      );
+      const snap = snapshot as ImportSnapshot | null;
+      expect(snap?.supplierInserts).toEqual([newHub.id]);
+
+      const picked = await resolveSupplierCounterparty(
+        db,
+        { id: newHub.id, inn: '', name: newHub.name },
+        quiet,
+      );
+      expect(picked?.kind).toBe('ok');
+      const cpId = (picked as { id: string }).id;
+
+      const r = await revertDirectoriesImport(db, snap!, { apply: true });
+      expect(r.plan.supplierDeletes).toEqual([]);
+      expect(r.plan.supplierKept).toEqual([
+        { id: newHub.id, reason: expect.stringContaining('служебные строки') as unknown },
+      ]);
+      expect(await linkOf(cpId)).toBe(newHub.id);
+    });
+
+    // Табличная SHARE ROW EXCLUSIVE отката не мешает FOR UPDATE выбора. Без
+    // построчной блокировки выбор прошёл бы мимо отката: завёл бы строку, и
+    // откат либо оставил бы запись, либо (между планом и DELETE) отвязал бы
+    // строку через SET NULL. С блокировкой выбор ждёт и получает directory_gone.
+    it('гонка: выбор поставщика во время отката ждёт его и получает directory_gone', async () => {
+      const newHub = hub({ name: 'ООО "ГОНКА ОТКАТА"', innRaw: '' });
+      let snapshot: ImportSnapshot | null = null;
+      await applyWithConfirm(
+        { suppliers: [newHub] },
+        {
+          apply: true,
+          beforeWrite: async (s) => {
+            snapshot = s;
+          },
+        },
+      );
+
+      const pending: { pick?: ReturnType<typeof resolveSupplierCounterparty> } = {};
+      let settled = false;
+      const r = await revertDirectoriesImport(db, snapshot!, {
+        apply: true,
+        afterLock: async () => {
+          // Без await: откат держит строку FOR UPDATE, выбор обязан ждать.
+          pending.pick = resolveSupplierCounterparty(
+            db2,
+            { id: newHub.id, inn: '', name: newHub.name },
+            quiet,
+          );
+          pending.pick.then(
+            () => (settled = true),
+            () => (settled = true),
+          );
+          for (let i = 0; i < 100; i++) {
+            if (settled) return;
+            const [w] = await sql<{ n: number }[]>`
+              select count(*)::int as n from pg_stat_activity
+               where datname = current_database() and wait_event_type = 'Lock'`;
+            if (w!.n > 0) return;
+            await new Promise((res) => setTimeout(res, 20));
+          }
+          throw new Error('выбор не встал на блокировку и не завершился');
+        },
+      });
+
+      expect(await pending.pick).toEqual({ kind: 'directory_gone' });
+      expect(r.plan.supplierDeletes).toEqual([newHub.id]);
+      const [n] = await sql<{ n: number }[]>`
+        select count(*)::int as n from counterparties where name = ${newHub.name}`;
+      expect(n!.n).toBe(0);
+    });
   });
 });

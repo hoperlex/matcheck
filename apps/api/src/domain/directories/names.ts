@@ -8,6 +8,7 @@
 // Границы слов — через \p{L} с флагом u: \b в JS работает только с латиницей,
 // и «ООО» в «ЭСКО ООО» им не ловится.
 
+import { isPlaceholderInn } from '@matcheck/contracts';
 import { isValidInnChecksum, normalizeInn } from '../sourceDocuments/resolve-contractor.js';
 
 export type LegalForm = 'ООО' | 'АО' | 'ИП';
@@ -150,8 +151,12 @@ export function styleContractorName(base: string): string {
   return s;
 }
 
-/** Цифры ИНН длиной 10/12 без проверки контрольной суммы — для сопоставления. */
+/**
+ * Цифры ИНН длиной 10/12 без проверки контрольной суммы — для сопоставления.
+ * Заглушка «0000…» отсекается до очистки — см. placeholder-inn.ts.
+ */
 export function innDigits(raw: string | null | undefined): string | null {
+  if (isPlaceholderInn((raw ?? '').trim())) return null;
   const d = (raw ?? '').replace(/\D/g, '');
   return d.length === 10 || d.length === 12 ? d : null;
 }

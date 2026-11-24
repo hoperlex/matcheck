@@ -3138,7 +3138,12 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
       // Берём поставщика из справочника, нормализуем ИНН (в suppliers
       // он может быть «грязным» — пробелы, префиксы; см. миграцию 0055).
       const [src] = await app.db
-        .select({ inn: suppliers.inn, name: suppliers.name, aliases: suppliers.aliases })
+        .select({
+          id: suppliers.id,
+          inn: suppliers.inn,
+          name: suppliers.name,
+          aliases: suppliers.aliases,
+        })
         .from(suppliers)
         .where(eq(suppliers.id, req.body.supplierDirectoryId))
         .limit(1);
@@ -3156,6 +3161,14 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
         return reply.code(404).send({
           error: 'counterparty_create_failed',
           message: 'Не удалось создать запись о поставщике',
+        });
+      }
+      // Запись удалили склейкой или откатом импорта справочников, пока её
+      // выбирали (поставщик без ИНН, supplier-counterparty.ts).
+      if (counterparty.kind === 'directory_gone') {
+        return reply.code(404).send({
+          error: 'supplier_not_found',
+          message: 'Поставщик из справочника не найден',
         });
       }
       // Под ИНН записана другая организация — не подменяем выбор чужим именем

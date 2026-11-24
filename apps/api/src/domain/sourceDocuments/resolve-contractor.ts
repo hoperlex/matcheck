@@ -25,6 +25,7 @@
 // Ограничение живёт в lib/contractor-scope.ts.
 
 import { and, eq, sql } from 'drizzle-orm';
+import { isPlaceholderInn } from '@matcheck/contracts';
 import type { Db } from '../../db/client.js';
 import { counterparties, sourceDocuments } from '../../db/schema.js';
 
@@ -45,7 +46,9 @@ export type ContractorMatch = {
  * в чужую организацию.
  */
 export function normalizeInn(raw: string | null | undefined): string | null {
-  if (!raw) return null;
+  // Заглушка «0000…» (placeholder-inn.ts) — не ИНН. Отсекаем до очистки: её
+  // хвост после удаления букв даёт 10 или 12 цифр в каждом четвёртом случае.
+  if (!raw || isPlaceholderInn(raw.trim())) return null;
   const digits = raw.replace(/\D/g, '');
   if (digits.length !== 10 && digits.length !== 12) return null;
   return isValidInnChecksum(digits) ? digits : null;

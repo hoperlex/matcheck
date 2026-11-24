@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isPlaceholderInn } from '@matcheck/contracts';
 import type { EstimatOrderContractor } from '../../db/schema.js';
 
 /**
@@ -19,9 +20,13 @@ const isoDate = z.string().transform((v, ctx) => {
 });
 const nullableIsoDate = isoDate.nullable();
 
-/** ИНН — только цифры, 10 или 12 знаков; иначе null (сырое значение остаётся в raw). */
+/**
+ * ИНН — только цифры, 10 или 12 знаков; иначе null (сырое значение остаётся в raw).
+ * Заглушка «0000…» (placeholder-inn.ts) — не ИНН: после очистки она может дать
+ * 10 или 12 цифр, поэтому отсекается до неё.
+ */
 export function innDigits(raw: string | null | undefined): string | null {
-  if (!raw) return null;
+  if (!raw || isPlaceholderInn(raw.trim())) return null;
   const digits = raw.replace(/\D/g, '');
   return digits.length === 10 || digits.length === 12 ? digits : null;
 }

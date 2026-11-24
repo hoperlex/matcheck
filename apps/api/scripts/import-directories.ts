@@ -277,6 +277,7 @@ async function runRevert(path: string): Promise<void> {
   console.info(
     `Откат: поставщиков вернуть ${p.supplierRestores.length} (конфликтов ${p.supplierConflicts.length}), ` +
       `восстановить дублей ${p.reinserts.length}, документов вернуть ${p.repoints.reduce((n, r) => n + r.docIds.length, 0)}, ` +
+      `служебных строк поставщиков вернуть ${p.repoints.reduce((n, r) => n + r.counterpartyIds.length, 0)}, ` +
       `удалить новых ${p.supplierDeletes.length} (оставить ${p.supplierKept.length}); ` +
       `подрядчиков вернуть ${p.contractorRestores.length} (конфликтов ${p.contractorConflicts.length}), ` +
       `удалить ${p.contractorDeletes.length} (оставить ${p.contractorKept.length})`,

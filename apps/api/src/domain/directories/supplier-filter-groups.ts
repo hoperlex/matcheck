@@ -21,7 +21,8 @@
 // того, какой её участник передан: иначе выдача менялась бы от выбора строки.
 
 import type { FastifyInstance } from 'fastify';
-import { isNotNull, sql as drSql } from 'drizzle-orm';
+import { inArray, isNotNull, sql as drSql } from 'drizzle-orm';
+import { isPlaceholderInn } from '@matcheck/contracts';
 import {
   counterparties,
   customerCounterparties,
@@ -67,8 +68,13 @@ export type SupplierFilterGroup = {
  * опечатки (в том числе 11-значные) обязаны совпадать между собой. Пусто и
  * сплошные нули — «нет ИНН». Не путать с innDigits из names.ts: тот отбрасывает
  * всё, кроме 10 и 12 знаков.
+ *
+ * Заглушка «0000…» служебной строки — тоже «нет ИНН», и отсекается до очистки:
+ * «0000ab123456» иначе стало бы «0000123456» и совпало бы с таким же грязным
+ * ИНН справочника. Служебную строку фильтр находит по supplier_directory_id.
  */
 export function filterInn(raw: string | null | undefined): string | null {
+  if (isPlaceholderInn((raw ?? '').trim())) return null;
   const d = (raw ?? '').replace(/\D/g, '');
   return d === '' || /^0+$/.test(d) ? null : d;
 }
@@ -325,6 +331,9 @@ function groupInnDigits(groups: readonly SupplierFilterGroup[]): string[] {
  *            подтверждение ИНН: импорт BillHub оставляет прежний ИНН строки.
  *            ИНН остальных участников берёт только контрагента с тем же именем
  *            или алиасом: иначе ТУЛА-СТАЛЬ с ИНН СУ-10 тянула бы приёмки СУ-10.
+ *            Плюс служебные строки поставщиков без ИНН — по ссылке
+ *            supplier_directory_id на любого участника (миграция 0156): ИНН у
+ *            них заглушка, и по ИНН их не найти.
  *
  * Неизвестный id (запись удалена склейкой) остаётся в dirIds сам по себе и,
  * как и прежде, ничего не находит.
@@ -346,18 +355,27 @@ export async function expandSupplierFilterIds(
     for (const m of g?.memberIds ?? [id]) dirIds.add(m);
   }
 
+  const opIds = new Set<string>();
   const digits = groupInnDigits([...picked]);
-  if (digits.length === 0) return { dirIds: [...dirIds], opIds: [] };
-  const rows = await app.db
-    .select({
-      id: counterparties.id,
-      inn: counterparties.inn,
-      name: counterparties.name,
-      aliases: counterparties.aliases,
-    })
+  if (digits.length > 0) {
+    const rows = await app.db
+      .select({
+        id: counterparties.id,
+        inn: counterparties.inn,
+        name: counterparties.name,
+        aliases: counterparties.aliases,
+      })
+      .from(counterparties)
+      .where(
+        drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') in ${digits}`,
+      );
+    for (const id of matchCounterpartiesToGroups([...picked], rows).keys()) opIds.add(id);
+  }
+  // Отдельно от ИНН: связь задаёт сам выбор поставщика, сверять тут нечего.
+  const linked = await app.db
+    .select({ id: counterparties.id })
     .from(counterparties)
-    .where(
-      drSql`regexp_replace(coalesce(${counterparties.inn}, ''), '[^0-9]', '', 'g') in ${digits}`,
-    );
-  return { dirIds: [...dirIds], opIds: [...matchCounterpartiesToGroups([...picked], rows).keys()] };
+    .where(inArray(counterparties.supplierDirectoryId, [...dirIds]));
+  for (const r of linked) opIds.add(r.id);
+  return { dirIds: [...dirIds], opIds: [...opIds] };
 }

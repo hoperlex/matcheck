@@ -23,7 +23,12 @@ import { randomUUID } from 'node:crypto';
 import { eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { CustomerCounterpartyUpsertSchema, SupplierUpsertSchema } from '@matcheck/contracts';
 import type { Db } from '../../db/client.js';
-import { customerCounterparties, sourceDocuments, suppliers } from '../../db/schema.js';
+import {
+  counterparties,
+  customerCounterparties,
+  sourceDocuments,
+  suppliers,
+} from '../../db/schema.js';
 import { supplierCreateLockKey } from '../sourceDocuments/supplierMatcher.js';
 import { touchSourceDocuments } from '../sourceDocuments/touch.js';
 import { innDigits } from './names.js';
@@ -73,7 +78,18 @@ export type ImportSnapshot = {
   fingerprint: string;
   supplierUpdates: Array<{ id: string; before: Record<string, unknown>; after: SupplierPatch }>;
   supplierInserts: string[];
-  merges: Array<{ targetId: string; sources: Array<{ row: SupplierRowJson; docIds: string[] }> }>;
+  merges: Array<{
+    targetId: string;
+    sources: Array<{
+      row: SupplierRowJson;
+      docIds: string[];
+      /**
+       * Служебные строки counterparties поставщика без ИНН, ссылавшиеся на
+       * дубль (supplier_directory_id, миграция 0156). В снимках до 0156 поля нет.
+       */
+      counterpartyIds?: string[];
+    }>;
+  }>;
   contractorUpdates: Array<{ id: string; before: string[]; after: string[] }>;
   contractorInserts: string[];
   touchedDocIds: string[];
@@ -82,6 +98,13 @@ export type ImportSnapshot = {
 export type DocsToTouch = {
   /** Источник склейки → id его документов. */
   bySource: Map<string, string[]>;
+  /**
+   * Источник склейки → служебные строки поставщика без ИНН, которые на него
+   * ссылаются (supplier-counterparty.ts). Переносятся на цель вместе с
+   * документами: иначе удаление дубля обнулило бы ссылку (ON DELETE SET NULL),
+   * и фильтр «Поставщик» перестал бы находить операции с этой строкой.
+   */
+  counterpartiesBySource: Map<string, string[]>;
   /** Документы в окне синхронизации, у которых сменится имя поставщика. */
   touchIds: string[];
   /** Такие же документы старше окна: планшет увидит имя при следующем изменении. */
@@ -205,7 +228,22 @@ export async function collectDocs(ex: Executor, plan: DirectoriesPlan): Promise<
   }
   for (const list of bySource.values()) list.sort();
   touchIds.sort();
-  return { bySource, touchIds, outsideWindow };
+
+  const counterpartiesBySource = new Map<string, string[]>();
+  for (const part of chunks([...sources], 500)) {
+    const rows = await ex
+      .select({ id: counterparties.id, directoryId: counterparties.supplierDirectoryId })
+      .from(counterparties)
+      .where(inArray(counterparties.supplierDirectoryId, part));
+    for (const r of rows) {
+      if (!r.directoryId) continue;
+      const list = counterpartiesBySource.get(r.directoryId) ?? [];
+      list.push(r.id);
+      counterpartiesBySource.set(r.directoryId, list);
+    }
+  }
+  for (const list of counterpartiesBySource.values()) list.sort();
+  return { bySource, counterpartiesBySource, touchIds, outsideWindow };
 }
 
 /**
@@ -269,6 +307,7 @@ function buildSnapshot(
       sources: m.sources.map((s) => ({
         row: toJson(supById.get(s.id)!),
         docIds: docs.bySource.get(s.id) ?? [],
+        counterpartyIds: docs.counterpartiesBySource.get(s.id) ?? [],
       })),
     })),
     contractorUpdates: [...(plan.contractors?.aliasUpdates ?? [])].map(([id, after]) => ({
@@ -330,6 +369,21 @@ async function writePlan(
       .returning({ id: sourceDocuments.id });
     if (moved.length !== expected)
       throw mismatch(`документы склейки в ${m.targetId}`, expected, moved.length);
+
+    // 2б. Служебные строки поставщика без ИНН — туда же. Источники заблокированы
+    // FOR UPDATE до collectDocs, а выбор поставщика берёт ту же строку FOR
+    // UPDATE до вставки: новых ссылок на источник между сбором и этим шагом нет.
+    const expectedCp = sourceIds.reduce(
+      (n, id) => n + (docs.counterpartiesBySource.get(id)?.length ?? 0),
+      0,
+    );
+    const movedCp = await tx
+      .update(counterparties)
+      .set({ supplierDirectoryId: m.targetId })
+      .where(inArray(counterparties.supplierDirectoryId, sourceIds))
+      .returning({ id: counterparties.id });
+    if (movedCp.length !== expectedCp)
+      throw mismatch(`служебные строки поставщиков в ${m.targetId}`, expectedCp, movedCp.length);
   }
 
   // 3. Правки существующих строк: импорт, алиасы целей, очищенный ИНН.

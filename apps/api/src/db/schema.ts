@@ -409,6 +409,15 @@ export const counterparties = pgTable(
     isSupplier: boolean('is_supplier').notNull().default(false),
     isCustomer: boolean('is_customer').notNull().default(false),
     isContractor: boolean('is_contractor').notNull().default(false),
+    // Запись «Поставщиков», для которой заведена служебная строка поставщика
+    // без ИНН (ИНН-заглушка «0000…»), — миграция 0156, supplier-counterparty.ts.
+    // По ней повторный выбор находит ту же строку, а фильтр «Поставщик» —
+    // операцию. У строк с настоящим ИНН — NULL: их ищут по ИНН. Не уникальна:
+    // склейка справочника переносит ссылки дублей на основную запись. В DTO и
+    // /sync не отдаётся.
+    supplierDirectoryId: uuid('supplier_directory_id').references(() => suppliers.id, {
+      onDelete: 'set null',
+    }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -422,6 +431,9 @@ export const counterparties = pgTable(
     index('counterparty_supplier_idx')
       .on(t.name)
       .where(sql`${t.isSupplier}`),
+    index('counterparty_supplier_directory_idx')
+      .on(t.supplierDirectoryId)
+      .where(sql`${t.supplierDirectoryId} is not null`),
     index('counterparty_contractor_idx')
       .on(t.name)
       .where(sql`${t.isContractor}`),

@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { and, eq, ilike, inArray, or, sql as drSql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -13,21 +12,14 @@ import {
   CounterpartySchema,
   CounterpartyUpsertSchema,
   ErrorResponseSchema,
-  PLACEHOLDER_INN_PREFIX,
   isPlaceholderInn,
 } from '@matcheck/contracts';
 import { counterparties, customerCounterparties, deliveries } from '../db/schema.js';
 import { pickOperationalCounterparty } from '../domain/directories/operational-pick.js';
 import { validInn } from '../domain/directories/names.js';
-
-/**
- * Генератор placeholder-ИНН для контрагентов, созданных «на лету» без ИНН.
- * Формат: 0000 + 8 hex = 12 символов, помещается в varchar(12). Шанс
- * коллизии — 16^8 = ~4·10⁹ комбинаций, для нашего объёма безопасно.
- */
-function generatePlaceholderInn(): string {
-  return PLACEHOLDER_INN_PREFIX + randomBytes(4).toString('hex');
-}
+// Заглушка ИНН для контрагентов, созданных «на лету» без ИНН, — общая с
+// выбором поставщика без ИНН (supplier-counterparty.ts).
+import { generatePlaceholderInn } from '../domain/directories/placeholder-inn.js';
 
 const ListQuerySchema = z.object({
   q: z.string().optional(),
