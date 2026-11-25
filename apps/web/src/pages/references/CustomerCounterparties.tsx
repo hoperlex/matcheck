@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Card,
   Drawer,
   Form,
+  Grid,
   Input,
   Popconfirm,
   Select,
@@ -17,9 +18,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   BulkDeleteResponse,
   CustomerCounterparty,
+  CustomerCounterpartySite,
   CustomerCounterpartyUpsert,
+  Site,
 } from '@matcheck/contracts';
-import { api } from '../../services/api';
+import { api, ApiError } from '../../services/api';
 import { usePermissions } from '../../shared/hooks/usePermissions';
 import { ResponsiveTable } from '../../shared/ui/ResponsiveTable';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
@@ -28,6 +31,14 @@ import { useBulkSelection } from '../../shared/ui/useBulkSelection';
 import { BulkActionInline } from '../../shared/ui/BulkActionInline';
 import { DebouncedSearch } from '../../shared/ui/DebouncedSearch';
 import { useUrlParam } from '../../shared/hooks/useUrlParam';
+import {
+  ContractorSitesFormList,
+  ContractorSitesText,
+  ContractorSiteTags,
+  contractorSiteLabel,
+  contractorSitesChanged,
+  siteSelectOptions,
+} from './contractorSites';
 
 type List = { items: CustomerCounterparty[]; total: number };
 
@@ -40,13 +51,40 @@ export default function CustomerCounterpartiesPage() {
   const [search, setSearch] = useUrlParam('q');
   const [form] = Form.useForm<CustomerCounterpartyUpsert>();
 
+  // withSites=1 — связи «объект → вид» нужны только этой странице; остальные
+  // экраны грузят список без них (суммы 1С не уходят инспекторам).
   const list = useQuery({
-    queryKey: ['customer-counterparties', search],
+    queryKey: ['customer-counterparties', 'with-sites', search],
     queryFn: () =>
       api.get<List>(
-        `/customer-counterparties?limit=5000${search ? `&q=${encodeURIComponent(search)}` : ''}`,
+        `/customer-counterparties?limit=5000&withSites=1${search ? `&q=${encodeURIComponent(search)}` : ''}`,
       ),
   });
+
+  const sitesList = useQuery({
+    queryKey: ['sites', { activeOnly: false, limit: 200 }],
+    queryFn: () => api.get<{ items: Site[]; total: number }>('/sites?limit=200'),
+    enabled: open,
+  });
+  const siteOptions = useMemo(
+    () => siteSelectOptions(sitesList.data?.items ?? []),
+    [sitesList.data],
+  );
+  const onecBySite = useMemo(
+    () =>
+      new Map(
+        (editing?.sites ?? [])
+          .filter(
+            (
+              s,
+            ): s is CustomerCounterpartySite & {
+              onec: NonNullable<CustomerCounterpartySite['onec']>;
+            } => s.onec !== null,
+          )
+          .map((s) => [s.siteId, s.onec]),
+      ),
+    [editing],
+  );
 
   const create = useMutation({
     mutationFn: (body: CustomerCounterpartyUpsert) => api.post('/customer-counterparties', body),
@@ -66,7 +104,17 @@ export default function CustomerCounterpartiesPage() {
       closeDrawer();
       void qc.invalidateQueries({ queryKey: ['customer-counterparties'] });
     },
-    onError: (err: Error) => message.error(err.message),
+    onError: (err: Error) => {
+      // Список объектов открыт по устаревшей версии: кто-то успел его изменить
+      // (или прошла загрузка из 1С). Показываем свежие данные — правку повторить.
+      if (err instanceof ApiError && err.code === 'contractor_sites_conflict') {
+        message.error('Объекты у подрядчика успели изменить — откройте карточку заново');
+        closeDrawer();
+        void qc.invalidateQueries({ queryKey: ['customer-counterparties'] });
+        return;
+      }
+      message.error(err.message);
+    },
   });
 
   const del = useMutation({
@@ -83,6 +131,7 @@ export default function CustomerCounterpartiesPage() {
   // «Создавать» и «Редактировать» разведены: раньше обе кнопки жили на одном
   // флаге, и действие «Создавать» в матрице оказалось бы мёртвым.
   const { can } = usePermissions();
+  const screens = Grid.useBreakpoint();
   const canCreate = can('references.customer_counterparties', 'create');
   const canEdit = can('references.customer_counterparties', 'edit');
   const canDelete = can('references.customer_counterparties', 'delete');
@@ -110,6 +159,7 @@ export default function CustomerCounterpartiesPage() {
         name: editing.name,
         aliases: editing.aliases ?? [],
         address: editing.address ?? undefined,
+        sites: (editing.sites ?? []).map((s) => ({ siteId: s.siteId, kind: s.kind })),
       });
     } else {
       form.resetFields();
@@ -133,10 +183,20 @@ export default function CustomerCounterpartiesPage() {
   }
 
   function onFinish(values: CustomerCounterpartyUpsert) {
+    const { sites: formSites, sitesVersion: _version, ...rest } = values;
+    const sites = (formSites ?? []).map((s) => ({ siteId: s.siteId, kind: s.kind }));
     if (editing) {
-      update.mutate({ id: editing.id, body: values });
+      // Объекты отправляем, только если список изменили: правка названия не
+      // должна спотыкаться о чужую правку объектов (409 по версии).
+      const initial = (editing.sites ?? []).map((s) => ({ siteId: s.siteId, kind: s.kind }));
+      const body: Partial<CustomerCounterpartyUpsert> = { ...rest };
+      if (contractorSitesChanged(initial, sites)) {
+        body.sites = sites;
+        body.sitesVersion = editing.sitesVersion;
+      }
+      update.mutate({ id: editing.id, body });
     } else {
-      create.mutate(values);
+      create.mutate(sites.length > 0 ? { ...rest, sites } : rest);
     }
   }
 
@@ -193,6 +253,9 @@ export default function CustomerCounterpartiesPage() {
           {
             title: 'ИНН',
             dataIndex: 'inn',
+            // 12 цифр ИП со стрелкой и воронкой; без ширины колонка забирала место
+            // у «Названия», и на 1024 px его заголовок рвался посреди слова.
+            width: 130,
             sorter: stringSorter<CustomerCounterparty>((r) => r.inn || null),
             render: (v: string) => v || '—',
           },
@@ -200,6 +263,22 @@ export default function CustomerCounterpartiesPage() {
             title: 'Название',
             dataIndex: 'name',
             sorter: stringSorter<CustomerCounterparty>((r) => r.name),
+          },
+          {
+            title: 'Объекты и вид',
+            key: 'sites',
+            dataIndex: 'sites',
+            // Самая длинная метка «ПРИМ14 · Реализация + давальческий» — ~240 px;
+            // на широком экране — две короткие метки в строку, строки ниже.
+            width: screens.xl ? 340 : 260,
+            // В фильтре каждая метка отдельным значением: «ЗИЛ18 · Давальческий».
+            tools: {
+              text: (r) => (r.sites ?? []).map(contractorSiteLabel),
+              sortValue: (r) => r.sites?.length ?? 0,
+            },
+            render: (_: unknown, r: CustomerCounterparty) => (
+              <ContractorSiteTags sites={r.sites ?? []} />
+            ),
           },
           {
             title: 'Альтернативные названия',
@@ -259,6 +338,7 @@ export default function CustomerCounterpartiesPage() {
               <Typography.Text strong>{r.name}</Typography.Text>
               <Typography.Text type="secondary">ИНН {r.inn || '—'}</Typography.Text>
               {r.address && <Typography.Text type="secondary">{r.address}</Typography.Text>}
+              <ContractorSitesText sites={r.sites ?? []} />
             </Space>
           </Card>
         )}
@@ -267,7 +347,7 @@ export default function CustomerCounterpartiesPage() {
         open={open}
         onClose={closeDrawer}
         title={editing ? 'Контрагент' : 'Новый контрагент'}
-        width={420}
+        width={560}
         destroyOnClose
         maskClosable={false}
         keyboard={false}
@@ -293,6 +373,12 @@ export default function CustomerCounterpartiesPage() {
           <Form.Item name="address" label="Адрес">
             <Input.TextArea rows={2} />
           </Form.Item>
+          <ContractorSitesFormList
+            form={form}
+            siteOptions={siteOptions}
+            sitesLoading={sitesList.isLoading}
+            onecBySite={onecBySite}
+          />
           <Button type="primary" htmlType="submit" loading={submitting} block size="large">
             Сохранить
           </Button>

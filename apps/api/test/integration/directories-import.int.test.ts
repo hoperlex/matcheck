@@ -441,6 +441,48 @@ suite('импорт справочников на PostgreSQL', () => {
     );
   });
 
+  it('откат не удаляет подрядчика с ручными связями «объект → вид» (0159)', async () => {
+    let snapshot: ImportSnapshot | null = null;
+    await applyWithConfirm(
+      { contractors: [oneC('РУЧНЫЕ СВЯЗИ ООО'), oneC('БЕЗ СВЯЗЕЙ ООО'), oneC('СВЯЗИ 1С ООО')] },
+      {
+        apply: true,
+        beforeWrite: async (s) => {
+          snapshot = s;
+        },
+      },
+    );
+    const ids = new Map(
+      (
+        await sql<{ id: string; name: string }[]>`
+          select id, name from customer_counterparties where id = any(${snapshot!.contractorInserts})`
+      ).map((r) => [r.name, r.id]),
+    );
+    const manualId = ids.get('ООО "РУЧНЫЕ СВЯЗИ"')!;
+    const onecId = ids.get('ООО "СВЯЗИ 1С"')!;
+    expect(manualId).toBeDefined();
+    expect(onecId).toBeDefined();
+    await sql`insert into customer_counterparty_sites
+                (customer_counterparty_id, site_id, manual_kind, manual_at)
+              values (${manualId}, ${siteId}, 'realization', now())`;
+    // Связь только из 1С вернёт повторный импорт — подрядчика не удерживает.
+    await sql`insert into customer_counterparty_sites
+                (customer_counterparty_id, site_id, onec_kind, onec_realization_docs,
+                 onec_realization_sum, onec_tolling_docs, onec_tolling_sum, onec_loaded_at)
+              values (${onecId}, ${siteId}, 'tolling_act', 0, 0, 1, 10, now())`;
+
+    const r = await revertDirectoriesImport(db, snapshot!, { apply: true });
+    expect(r.plan.contractorKept).toEqual([
+      { id: manualId, reason: 'ручные связи с объектами: 1' },
+    ]);
+    expect(r.plan.contractorDeletes).toHaveLength(2);
+    expect(r.plan.contractorDeletes).toContain(onecId);
+    const left = await sql<{ id: string }[]>`
+      select customer_counterparty_id as id from customer_counterparty_sites
+       where customer_counterparty_id in (${manualId}, ${onecId})`;
+    expect(left.map((x) => x.id)).toEqual([manualId]);
+  });
+
   it('склейка без файлов: near_inn и ручная пара — запись, повтор пуст, откат', async () => {
     // Цель с корректным ИНН и дубль с одной неверной цифрой и опечаткой в
     // имени: правила 22.10 их не связывают — ключи имён разные.

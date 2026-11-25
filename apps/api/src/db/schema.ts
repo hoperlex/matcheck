@@ -512,6 +512,81 @@ export const customerCounterparties = pgTable(
   (t) => [index('customer_counterparty_name_idx').on(t.name)],
 );
 
+/** Вид работы подрядчика на объекте; коды — как у признака приёмки (deliveries.purpose). */
+export type ContractorSiteKindDb = 'realization' | 'tolling_act' | 'realization_tolling';
+/** Ручной вид; 'none' — строка 1С скрыта вручную. */
+export type ContractorSiteManualKind = ContractorSiteKindDb | 'none';
+
+/**
+ * Подрядчик (справочник «Контрагенты») × объект → вид (миграция 0159).
+ * onec_* пишет только импорт scripts/import-contractor-sites.ts, manual_* —
+ * только карточка контрагента. Действующий вид = coalesce(manual_kind, onec_kind),
+ * 'none' — скрыто. Логика — domain/contractor-sites/.
+ */
+export const customerCounterpartySites = pgTable(
+  'customer_counterparty_sites',
+  {
+    customerCounterpartyId: uuid('customer_counterparty_id')
+      .notNull()
+      .references(() => customerCounterparties.id, { onDelete: 'cascade' }),
+    siteId: uuid('site_id')
+      .notNull()
+      .references(() => sites.id, { onDelete: 'cascade' }),
+    onecKind: varchar('onec_kind', { length: 24 }).$type<ContractorSiteKindDb>(),
+    onecRealizationDocs: integer('onec_realization_docs'),
+    onecRealizationSum: numeric('onec_realization_sum', { precision: 16, scale: 2 }),
+    onecTollingDocs: integer('onec_tolling_docs'),
+    onecTollingSum: numeric('onec_tolling_sum', { precision: 16, scale: 2 }),
+    onecObjects: text('onec_objects')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    onecLoadedAt: timestamp('onec_loaded_at', { withTimezone: true }),
+    manualKind: varchar('manual_kind', { length: 24 }).$type<ContractorSiteManualKind>(),
+    manualByUserId: uuid('manual_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    manualAt: timestamp('manual_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.customerCounterpartyId, t.siteId] }),
+    index('customer_counterparty_sites_site_idx').on(t.siteId),
+    check(
+      'customer_counterparty_sites_onec_kind_check',
+      sql`${t.onecKind} IS NULL OR ${t.onecKind} IN ('realization', 'tolling_act', 'realization_tolling')`,
+    ),
+    check(
+      'customer_counterparty_sites_manual_kind_check',
+      sql`${t.manualKind} IS NULL OR ${t.manualKind} IN ('realization', 'tolling_act', 'realization_tolling', 'none')`,
+    ),
+    check(
+      'customer_counterparty_sites_has_kind',
+      sql`${t.onecKind} IS NOT NULL OR ${t.manualKind} IS NOT NULL`,
+    ),
+    check(
+      'customer_counterparty_sites_hidden_needs_onec',
+      sql`${t.manualKind} IS DISTINCT FROM 'none' OR ${t.onecKind} IS NOT NULL`,
+    ),
+    check(
+      'customer_counterparty_sites_onec_complete',
+      sql`(${t.onecKind} IS NULL) = (${t.onecRealizationDocs} IS NULL)
+        AND (${t.onecKind} IS NULL) = (${t.onecRealizationSum} IS NULL)
+        AND (${t.onecKind} IS NULL) = (${t.onecTollingDocs} IS NULL)
+        AND (${t.onecKind} IS NULL) = (${t.onecTollingSum} IS NULL)
+        AND (${t.onecKind} IS NULL) = (${t.onecLoadedAt} IS NULL)`,
+    ),
+    check(
+      'customer_counterparty_sites_onec_non_negative',
+      sql`${t.onecRealizationDocs} >= 0 AND ${t.onecTollingDocs} >= 0
+        AND ${t.onecRealizationSum} >= 0 AND ${t.onecTollingSum} >= 0`,
+    ),
+    check(
+      'customer_counterparty_sites_manual_at',
+      sql`(${t.manualKind} IS NULL) = (${t.manualAt} IS NULL)`,
+    ),
+  ],
+);
+
 // ─── Справочник МОЛ (материально-ответственные лица собственных бригад) ────
 // См. миграцию 0027. Параллелен counterparties с ролью contractor:
 // получатели материалов и ОС, на которых оформляется документ. Не путать

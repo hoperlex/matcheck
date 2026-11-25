@@ -25,6 +25,7 @@ import type { Db } from '../../db/client.js';
 import {
   counterparties,
   customerCounterparties,
+  customerCounterpartySites,
   sourceDocuments,
   suppliers,
   users,
@@ -209,10 +210,27 @@ async function buildRevertPlan(ex: Executor, snap: ImportSnapshot): Promise<Reve
       .select({ id: users.id })
       .from(users)
       .where(eq(users.contractorCustomerId, id));
+    // Ручные связи «объект → вид» (0159) ушли бы каскадом без следа — их
+    // вносили руками в карточке, повторный импорт их не вернёт.
+    const manualSites = await ex
+      .select({ siteId: customerCounterpartySites.siteId })
+      .from(customerCounterpartySites)
+      .where(
+        and(
+          eq(customerCounterpartySites.customerCounterpartyId, id),
+          sql`${customerCounterpartySites.manualKind} IS NOT NULL`,
+          sql`${customerCounterpartySites.manualKind} <> 'none'`,
+        ),
+      );
     if (refs.length > 0)
       plan.contractorKept.push({
         id,
         reason: `к подрядчику привязаны пользователи: ${refs.length}`,
+      });
+    else if (manualSites.length > 0)
+      plan.contractorKept.push({
+        id,
+        reason: `ручные связи с объектами: ${manualSites.length}`,
       });
     else plan.contractorDeletes.push(id);
   }
