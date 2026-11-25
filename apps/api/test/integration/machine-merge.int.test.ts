@@ -263,18 +263,33 @@ suite('объединение машин (реальный PostgreSQL)', { timeo
     expect(chains.length).toBe(0);
   });
 
+  it('разные поставщики — не отказ: объединение проходит, предпросмотр предупреждает', async () => {
+    // Решение 25.11.2026: машина с документами разных поставщиков — то же, что
+    // загрузка одной отправкой (19 % боевых приёмок с несколькими документами).
+    const a = await seedDoc(await seedUpload());
+    const b = await seedDoc(await seedUpload(), { supplier: supplier2 });
+
+    const analysis = await mm.analyzeMerge(db, [a, b]);
+    expect(analysis.blockers).toEqual([]);
+    const warning = analysis.warnings.find((w) => w.code === 'different_suppliers');
+    expect(warning).toBeDefined();
+    if (warning?.code === 'different_suppliers') {
+      expect(warning.values.map((v) => v.label).sort()).toEqual(['Поставщик 1', 'Поставщик 2']);
+      expect(warning.values.flatMap((v) => v.documentIds).sort()).toEqual([a, b].sort());
+    }
+
+    const r = await merge([a, b]);
+    expect(r.ok && r.changed).toBe(true);
+    const rows =
+      await sql`SELECT 1 FROM machine_merges WHERE merge_id = ${r.ok ? r.mergeId : null}`;
+    expect(rows.length).toBe(1);
+  });
+
   it('каждый отказ ничего не пишет', async () => {
     const before = async () =>
       (await sql`SELECT count(*)::int AS n FROM machine_merges`)[0]!.n as number;
     const n0 = await before();
 
-    // Разные поставщики.
-    {
-      const a = await seedDoc(await seedUpload());
-      const b = await seedDoc(await seedUpload(), { supplier: supplier2 });
-      const r = await merge([a, b]);
-      expect(!r.ok && 'blocker' in r && r.blocker.code).toBe('different_suppliers');
-    }
     // Разные даты поставки.
     {
       const a = await seedDoc(await seedUpload({ date: '2026-11-19' }), { date: '2026-11-19' });

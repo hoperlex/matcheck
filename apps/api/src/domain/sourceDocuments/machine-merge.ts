@@ -62,8 +62,6 @@ export type MergeBlocker =
   | { code: 'different_sites'; values: MergeValueGroup[] }
   /** Разные даты поставки. */
   | { code: 'different_expected_dates'; values: MergeValueGroup[] }
-  /** Больше одного поставщика: планшет взял бы реквизиты одной части. */
-  | { code: 'different_suppliers'; values: MergeValueGroup[] }
   /** Больше одного получателя (подрядчик или МОЛ). */
   | { code: 'different_recipients'; values: MergeValueGroup[] }
   /** По машине уже есть приёмка, отгрузка, привязка ЭДО или claim. */
@@ -151,8 +149,19 @@ export type MergeAnalysis = {
   siteId: string | null;
   expectedDate: string | null;
   blockers: MergeBlocker[];
-  warnings: Array<{ code: 'documents_in_progress'; count: number }>;
+  warnings: MergeWarning[];
 };
+
+/** Объединить можно, но менеджеру стоит знать. */
+export type MergeWarning =
+  | { code: 'documents_in_progress'; count: number }
+  /**
+   * Документы разных поставщиков. Не запрет: так же выглядит машина, загруженная
+   * одной отправкой, — у каждого документа свой поставщик (позиции и выгрузка в
+   * 1С — по документу), в шапке приёмки — первое непустое (планшет,
+   * SourceDocGroup.mergeGroupParty: сначала УПД).
+   */
+  | { code: 'different_suppliers'; values: MergeValueGroup[] };
 
 /** Головы машин документов, без блокировок. null — у документа нет пакета. */
 async function headsOfDocuments(
@@ -399,10 +408,12 @@ export async function analyzeMerge(tx: Db, documentIds: string[]): Promise<Merge
     });
   }
 
-  // Реквизиты: у машины не больше одного поставщика и одного получателя —
-  // планшет берёт первое непустое значение (SourceDocGroup.mergeGroupParty), и
-  // при двух разных приёмка получила бы реквизиты одной части при материалах
-  // обеих.
+  // Поставщики — предупреждение, не запрет (решение 25.11.2026). Машина с
+  // документами разных поставщиков — обычное дело и без объединения: за 60 дней
+  // 96 из 510 приёмок с несколькими документами (19 %) содержали разных
+  // поставщиков по ИНН — чаще всего УПД + транспортная накладная, где
+  // «поставщик» = грузоотправитель. Объединение даёт то же, что загрузка одной
+  // отправкой.
   const suppliers = groupValues(
     docs,
     (d) => d.supplier_key,
@@ -411,7 +422,9 @@ export async function analyzeMerge(tx: Db, documentIds: string[]): Promise<Merge
       ignoreNull: true,
     },
   );
-  if (suppliers.length > 1) blockers.push({ code: 'different_suppliers', values: suppliers });
+  // Получатель — запрет: планшет берёт первое непустое значение
+  // (SourceDocGroup.mergeGroupParty), и при двух разных приёмка ушла бы не тому
+  // получателю. В боевых приёмках получатели не расходились ни разу.
   const recipients = groupValues(
     docs,
     (d) =>
@@ -489,6 +502,9 @@ export async function analyzeMerge(tx: Db, documentIds: string[]): Promise<Merge
   });
 
   const inProgress = docs.filter((d) => d.status === 'queued' || d.status === 'processing').length;
+  const warnings: MergeWarning[] = [];
+  if (inProgress) warnings.push({ code: 'documents_in_progress', count: inProgress });
+  if (suppliers.length > 1) warnings.push({ code: 'different_suppliers', values: suppliers });
   return {
     machines,
     targetHeadId,
@@ -497,7 +513,7 @@ export async function analyzeMerge(tx: Db, documentIds: string[]): Promise<Merge
     siteId,
     expectedDate,
     blockers,
-    warnings: inProgress ? [{ code: 'documents_in_progress', count: inProgress }] : [],
+    warnings,
   };
 }
 

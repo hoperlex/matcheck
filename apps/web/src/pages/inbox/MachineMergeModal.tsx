@@ -1,10 +1,15 @@
 import { Alert, Button, List, Modal, Space, Spin, Tag, Typography, message } from 'antd';
-import type { MachineMergeResponse } from '@matcheck/contracts';
+import type { MachineMergeResponse, MachineMergeValueGroup } from '@matcheck/contracts';
 import { ApiError } from '../../services/api';
 import { formatDateRu } from '../../shared/utils/formatRu';
 import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 import { documentsCount } from './machineGroupRows';
 import { useMachineMergeMutation, useMachineMergePreview } from './useMachineMerge';
+
+/** «ООО А, ООО Б»; поставщик без имени — «без названия». */
+function supplierLabels(values: MachineMergeValueGroup[]): string {
+  return values.map((v) => v.label ?? 'без названия').join(', ');
+}
 
 /**
  * «Объединить в одну машину»: предпросмотр итоговой карточки и подтверждение.
@@ -119,6 +124,14 @@ export function MachineMergeModal({
                 type="warning"
                 showIcon
                 message={`${documentsCount(w.count)} ещё распознаётся — машина появится на планшете целиком, когда разбор закончится`}
+              />
+            ) : w.code === 'different_suppliers' ? (
+              <Alert
+                key={w.code}
+                type="warning"
+                showIcon
+                message={`Документы разных поставщиков: ${supplierLabels(w.values)}`}
+                description="Как при загрузке одной отправкой: у каждого документа остаётся свой поставщик — позиции и выгрузка в 1С идут по документу. В шапке приёмки будет поставщик первого УПД."
               />
             ) : null,
           )}

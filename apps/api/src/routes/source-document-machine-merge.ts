@@ -75,8 +75,6 @@ export function machineMergeBlockerMessage(b: MachineMergeBlocker): string {
       return 'Документы с разных объектов — сначала поправьте объект у одной из машин';
     case 'different_expected_dates':
       return `Разные даты поставки (${values(b.values)}) — сначала поправьте дату у одной из машин`;
-    case 'different_suppliers':
-      return `Разные поставщики (${values(b.values)}) — в одну приёмку их объединить нельзя`;
     case 'different_recipients':
       return `Разные получатели (${values(b.values)}) — в одну приёмку их объединить нельзя`;
     case 'machine_has_operation': {

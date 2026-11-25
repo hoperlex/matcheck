@@ -46,10 +46,6 @@ export const MachineMergeBlockerSchema = z.discriminatedUnion('code', [
     values: z.array(MachineMergeValueGroupSchema),
   }),
   z.object({
-    code: z.literal('different_suppliers'),
-    values: z.array(MachineMergeValueGroupSchema),
-  }),
-  z.object({
     code: z.literal('different_recipients'),
     values: z.array(MachineMergeValueGroupSchema),
   }),
@@ -61,6 +57,25 @@ export const MachineMergeBlockerSchema = z.discriminatedUnion('code', [
   }),
 ]);
 export type MachineMergeBlocker = z.infer<typeof MachineMergeBlockerSchema>;
+
+/**
+ * Объединить можно, но менеджеру стоит знать. Новый вид — только членом этого
+ * union: схема ответа сериализует результат разбора, и неизвестный элемент
+ * массива уронил бы ответ предпросмотра.
+ */
+export const MachineMergeWarningSchema = z.discriminatedUnion('code', [
+  z.object({ code: z.literal('documents_in_progress'), count: z.number().int() }),
+  /**
+   * Документы разных поставщиков (с 25.11.2026 не запрет): как машина, загруженная
+   * одной отправкой, — у каждого документа свой поставщик, в шапке приёмки —
+   * поставщик первого УПД.
+   */
+  z.object({
+    code: z.literal('different_suppliers'),
+    values: z.array(MachineMergeValueGroupSchema),
+  }),
+]);
+export type MachineMergeWarning = z.infer<typeof MachineMergeWarningSchema>;
 
 export const MachineMergeConfigResponseSchema = z.object({
   /** Объекты с включённым объединением; `['*']` — все, пусто — нигде. */
@@ -101,9 +116,7 @@ export const MachineMergePreviewResponseSchema = z.object({
   blockers: z.array(MachineMergeBlockerSchema),
   /** Тексты отказов для окна — в том же порядке, что и blockers. */
   blockerMessages: z.array(z.string()),
-  warnings: z.array(
-    z.object({ code: z.literal('documents_in_progress'), count: z.number().int() }),
-  ),
+  warnings: z.array(MachineMergeWarningSchema),
 });
 export type MachineMergePreviewResponse = z.infer<typeof MachineMergePreviewResponseSchema>;
 
