@@ -1,14 +1,26 @@
 import { z } from 'zod';
 
 /**
- * Вид работы подрядчика на объекте (связь «Контрагенты» × объект, миграция 0159).
- * Коды совпадают с признаком приёмки (DeliveryPurposeSchema), чтобы данные
- * можно было подставлять в «Признак» без пересчёта.
+ * Вид по выгрузке 1С «Списание по субподряду»: как наши материалы передаются
+ * подрядчику на объекте (миграция 0159). Собственных материалов подрядчика
+ * 1С не видит — такого вида у неё нет.
  */
-export const ContractorSiteKindSchema = z.enum([
+export const ContractorSiteOnecKindSchema = z.enum([
   'realization',
   'tolling_act',
   'realization_tolling',
+]);
+export type ContractorSiteOnecKind = z.infer<typeof ContractorSiteOnecKindSchema>;
+
+/**
+ * Действующий вид работы подрядчика на объекте (связь «Контрагенты» × объект).
+ * Вид 1С плюс ручной «Материалы подрядчика» (миграция 0160): его ставят в
+ * карточке, когда подрядчик на объекте работает своими материалами. Коды
+ * совпадают с признаком приёмки (DeliveryPurposeSchema).
+ */
+export const ContractorSiteKindSchema = z.enum([
+  ...ContractorSiteOnecKindSchema.options,
+  'contractor_materials',
 ]);
 export type ContractorSiteKind = z.infer<typeof ContractorSiteKindSchema>;
 
@@ -16,11 +28,12 @@ export const CONTRACTOR_SITE_KIND_LABELS: Record<ContractorSiteKind, string> = {
   realization: 'Реализация',
   tolling_act: 'Давальческий',
   realization_tolling: 'Реализация + давальческий',
+  contractor_materials: 'Материалы подрядчика',
 };
 
 /** Данные выгрузки 1С «Списание по субподряду» по паре подрядчик × объект. */
 export const CustomerCounterpartySiteOnecSchema = z.object({
-  kind: ContractorSiteKindSchema,
+  kind: ContractorSiteOnecKindSchema,
   realizationDocs: z.number().int(),
   tollingDocs: z.number().int(),
   /** Суммы — строкой с двумя знаками; null — роли суммы не показываются. */

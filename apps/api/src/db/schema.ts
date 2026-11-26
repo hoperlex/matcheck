@@ -512,10 +512,13 @@ export const customerCounterparties = pgTable(
   (t) => [index('customer_counterparty_name_idx').on(t.name)],
 );
 
-/** Вид работы подрядчика на объекте; коды — как у признака приёмки (deliveries.purpose). */
+/** Вид работы подрядчика на объекте по 1С; коды — как у признака приёмки (deliveries.purpose). */
 export type ContractorSiteKindDb = 'realization' | 'tolling_act' | 'realization_tolling';
-/** Ручной вид; 'none' — строка 1С скрыта вручную. */
-export type ContractorSiteManualKind = ContractorSiteKindDb | 'none';
+/**
+ * Ручной вид: виды 1С и «Материалы подрядчика» (0160, у 1С такого нет);
+ * 'none' — строка 1С скрыта вручную.
+ */
+export type ContractorSiteManualKind = ContractorSiteKindDb | 'contractor_materials' | 'none';
 
 /**
  * Подрядчик (справочник «Контрагенты») × объект → вид (миграция 0159).
@@ -557,7 +560,7 @@ export const customerCounterpartySites = pgTable(
     ),
     check(
       'customer_counterparty_sites_manual_kind_check',
-      sql`${t.manualKind} IS NULL OR ${t.manualKind} IN ('realization', 'tolling_act', 'realization_tolling', 'none')`,
+      sql`${t.manualKind} IS NULL OR ${t.manualKind} IN ('realization', 'tolling_act', 'realization_tolling', 'contractor_materials', 'none')`,
     ),
     check(
       'customer_counterparty_sites_has_kind',

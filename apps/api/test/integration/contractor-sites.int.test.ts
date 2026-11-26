@@ -400,6 +400,49 @@ suite('связи подрядчик × объект на PostgreSQL', () => {
       );
     });
 
+    it('0160: ручной «Материалы подрядчика» — поверх 1С и без 1С; загрузка 1С его не трогает', async () => {
+      await importEntries([entry(ccX, siteA, layer('realization', 3, 0))]);
+      const c = await card(ccX);
+      const res = await patch(ccX, {
+        sites: [
+          { siteId: siteA, kind: 'contractor_materials' },
+          { siteId: siteB, kind: 'contractor_materials' },
+        ],
+        sitesVersion: c.sitesVersion,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(
+        (res.json() as CustomerCounterparty).sites!.map((s) => [
+          s.siteCode,
+          s.kind,
+          s.manual,
+          s.onec?.kind ?? null,
+        ]),
+      ).toEqual([
+        ['СВА', 'contractor_materials', true, 'realization'],
+        ['СВБ', 'contractor_materials', true, null],
+      ]);
+
+      await importEntries([entry(ccX, siteA, layer('realization_tolling', 4, 1))]);
+      const rows = await tableRows();
+      expect(rows.map((r) => [r.site, r.onec_kind, r.manual_kind]).sort()).toEqual(
+        [
+          [siteA, 'realization_tolling', 'contractor_materials'],
+          [siteB, null, 'contractor_materials'],
+        ].sort(),
+      );
+
+      // 1С этот вид писать не может: CHECK onec_kind прежний.
+      await expect(
+        sql`update customer_counterparty_sites set onec_kind = 'contractor_materials'
+             where site_id = ${siteA}`,
+      ).rejects.toThrow(/customer_counterparty_sites_onec_kind_check/);
+      await expect(
+        sql`update customer_counterparty_sites set manual_kind = 'own_forces'
+             where site_id = ${siteA}`,
+      ).rejects.toThrow(/customer_counterparty_sites_manual_kind_check/);
+    });
+
     async function userRef(): Promise<string[]> {
       return (
         await sql<

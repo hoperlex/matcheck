@@ -1,4 +1,4 @@
-// «Объекты и вид» у подрядчика (справочник «Контрагенты», миграция 0159):
+// «Объекты и вид» у подрядчика (справочник «Контрагенты», миграции 0159, 0160):
 // метки в таблице, подсказка с данными 1С и блок правки в карточке.
 import { Button, Flex, Form, Select, Space, Tag, Tooltip, Typography } from 'antd';
 import type { FormInstance } from 'antd';
@@ -17,6 +17,8 @@ export const CONTRACTOR_SITE_KIND_COLORS: Record<ContractorSiteKind, string> = {
   realization: 'blue',
   tolling_act: 'orange',
   realization_tolling: 'purple',
+  // Ручной вид (0160): подрядчик работает своими материалами — у 1С такого нет.
+  contractor_materials: 'green',
 };
 
 const KIND_OPTIONS = (Object.keys(CONTRACTOR_SITE_KIND_LABELS) as ContractorSiteKind[]).map(

@@ -1107,6 +1107,13 @@
       "when": 1798700000000,
       "tag": "0159_customer_counterparty_sites",
       "breakpoints": true
+    },
+    {
+      "idx": 160,
+      "version": "7",
+      "when": 1798800000000,
+      "tag": "0160_contractor_site_materials",
+      "breakpoints": true
     }
   ]
 }
