@@ -12,6 +12,7 @@ import { enqueueFullLoad } from '../../lib/thumbQueue';
 import { useBreakpoint } from '../../shared/hooks/useBreakpoint';
 import type { OperationKind } from '../../lib/db';
 import { ZoomableImage } from '../../shared/ui/ZoomableImage';
+import { formatIsoDayRu } from '../../shared/utils/formatRu';
 import { photoRowHints, rowCheckText, type PhotoRowHint } from './photoRowHints';
 
 /**
@@ -572,7 +573,7 @@ function RecognitionPanel({
           </Tag>
         )}
         {data.docNumber && <Tag>№ {data.docNumber}</Tag>}
-        {data.docDate && <Tag>{data.docDate}</Tag>}
+        {data.docDate && <Tag>{formatIsoDayRu(data.docDate)}</Tag>}
         {data.totalSum !== null && <Tag color="green">Итого: {formatMoney(data.totalSum)}</Tag>}
         {data.vatSum !== null && <Tag>НДС: {formatMoney(data.vatSum)}</Tag>}
       </div>

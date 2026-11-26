@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { Button, Popconfirm, Popover, Space, Tag, Typography } from 'antd';
 import { DisconnectOutlined, SwapOutlined } from '@ant-design/icons';
 import type { DeliveryContract } from '@matcheck/contracts';
+import { HeaderChip } from '../../shared/ui/HeaderChip';
 import { formatMsk } from '../../shared/utils/estimatOrder';
 import {
   contractDateRu,
@@ -21,13 +22,13 @@ import {
  */
 export function ContractChip({
   contract,
-  label = 'Договор:',
+  label = 'Договор',
   onUnlink,
   onReplace,
   unlinkPending = false,
 }: {
   contract: DeliveryContract | null;
-  /** Подпись чипа: «Договор:» или «Договор (общий):» в режиме «разные получатели». */
+  /** Подпись чипа: «Договор» или «Договор (общий)» в режиме «разные получатели»; двоеточие ставит плашка. */
   label?: string;
   /** undefined — прав нет, кнопок не будет. Аргумент — договор, который человек видел. */
   onUnlink?: (expectedContractId: string) => void;
@@ -105,20 +106,15 @@ export function ContractChip({
 
   return (
     <Popover content={details} trigger="click" placement="bottomLeft" open={open} onOpenChange={setOpen}>
-      <Tag
+      <HeaderChip
         color={warnings.length > 0 ? 'orange' : 'blue'}
-        style={{ marginInlineEnd: 0, cursor: 'pointer' }}
+        interactive
         data-testid="contract-chip"
         data-warn={warnings.length > 0 ? 'true' : 'false'}
         title={contract.name}
-      >
-        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-          {label}
-        </Typography.Text>{' '}
-        <Typography.Text strong style={{ fontSize: 12 }}>
-          {contractShortLabel(contract)}
-        </Typography.Text>
-      </Tag>
+        label={label}
+        value={contractShortLabel(contract)}
+      />
     </Popover>
   );
 }

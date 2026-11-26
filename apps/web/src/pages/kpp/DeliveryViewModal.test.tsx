@@ -20,6 +20,7 @@ vi.mock('../../shared/hooks/usePermissions', () => ({
 vi.mock('./PhotoGallery', () => ({ PhotoGallery: () => null }));
 
 import { DeliveryViewModal } from './DeliveryViewModal';
+import { chipText } from '../../test/chipText';
 
 const data = {
   delivery: {
@@ -58,7 +59,7 @@ describe('DeliveryViewModal: вход в редактор', () => {
     renderModal();
     expect(screen.getByRole('button', { name: /Открыть в редакторе/i })).toBeDefined();
     expect(can).toHaveBeenCalledWith('operations.deliveries', 'edit');
-    expect(screen.getByText('Признак: Давальческий акт')).toBeDefined();
+    expect(screen.getByText(chipText('Признак: Давальческий акт'))).toBeDefined();
   });
 
   it('права нет — кнопки нет, остаётся только «Закрыть»', () => {
@@ -111,8 +112,8 @@ describe('DeliveryViewModal: вход в редактор', () => {
       },
     });
     expect(screen.getByText(/Материалы · УПД № 77/)).toBeTruthy();
-    expect(screen.getByText(/Получатель: — не указан/)).toBeTruthy();
-    expect(screen.getByText(/Признак: — не выбран/)).toBeTruthy();
+    expect(screen.getByText(chipText(/Получатель: — не указан/))).toBeTruthy();
+    expect(screen.getByText(chipText(/Признак: — не выбран/))).toBeTruthy();
   });
   it('УПД из ЭДО без скана (0152): блоки с получателем и признаком без права правки и без запросов', () => {
     can.mockReturnValue(false);
@@ -169,9 +170,11 @@ describe('DeliveryViewModal: вход в редактор', () => {
     });
     expect(screen.getByText('Материалы · УПД № 201/21126982-2332 из ЭДО · Диадок')).toBeTruthy();
     expect(screen.getByText('Материалы · УПД № 1438 из ЭДО · СБИС')).toBeTruthy();
-    expect(screen.getByText(/Получатель: Подрядчик: ООО КС/)).toBeTruthy();
-    expect(screen.getByText(/Получатель: как у приёмки: — не указан/)).toBeTruthy();
-    expect(screen.getAllByText(/Признак: как у приёмки: Давальческий акт/)).toHaveLength(2);
+    expect(screen.getByText(chipText(/Получатель: Подрядчик: ООО КС/))).toBeTruthy();
+    expect(screen.getByText(chipText(/Получатель: как у приёмки: — не указан/))).toBeTruthy();
+    expect(screen.getAllByText(chipText(/Признак: как у приёмки: Давальческий акт/))).toHaveLength(
+      2,
+    );
     // Данные — из строки списка: чтение ЭДО (право правки) не нужно.
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
@@ -213,9 +216,11 @@ describe('DeliveryViewModal: сумма по УПД из ЭДО', () => {
       docTotalSum: 2323906.09,
       docTotalLabel: 'Сумма по ЭДО',
     });
-    expect(screen.getByText(/^Сумма по ЭДО: 2 323 906,09 .* · УПД на 2 приёмки/)).toBeTruthy();
+    expect(
+      screen.getByText(chipText(/^Сумма по ЭДО: 2 323 906,09 .* · УПД на 2 приёмки/)),
+    ).toBeTruthy();
     expect(screen.getByText(/по скану 156 336,00/)).toBeTruthy();
-    expect(screen.getByText('УПД из ЭДО №524')).toBeTruthy();
+    expect(screen.getByText(chipText('УПД из ЭДО: 524'))).toBeTruthy();
     // sourceDocumentIds пуст, но УПД из ЭДО есть — это не «без документа».
     expect(screen.queryByText('Без документа')).toBeNull();
   });

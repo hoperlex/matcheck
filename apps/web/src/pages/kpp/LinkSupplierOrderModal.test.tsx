@@ -248,7 +248,7 @@ describe('LinkSupplierOrderModal: подробности по клику на с
     expect(getUrls()).toContain(`/deliveries/d1/supplier-order-candidates/${c.id}/items`);
     const row = within(expandedRow());
     expect(row.getByText(new RegExp(`${longContractor} \\(МОЛ\\), ИНН 771234567890`))).toBeTruthy();
-    expect(row.getByText(/Д-7 от 2026-10-01/)).toBeTruthy();
+    expect(row.getByText(/Д-7 от 01\.10\.2026/)).toBeTruthy();
     expect(isExpanded()).toBe(true);
 
     fireEvent.click(screen.getAllByText(c.number)[0]!);
@@ -318,7 +318,7 @@ describe('LinkSupplierOrderModal: подробности по клику на с
     fireEvent.click(await screen.findByText(c.number));
     expect(await within(await waitFor(() => expandedRow())).findByText(text)).toBeTruthy();
     if (_name === 'сбой состава — поля на месте') {
-      expect(within(expandedRow()).getByText(/Д-7 от 2026-10-01/)).toBeTruthy();
+      expect(within(expandedRow()).getByText(/Д-7 от 01\.10\.2026/)).toBeTruthy();
     }
   });
 });

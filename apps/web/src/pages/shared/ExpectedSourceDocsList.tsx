@@ -20,7 +20,7 @@ import { ListFilters, type ListFiltersValue } from '../../shared/ui/ListFilters'
 import { PageTabs, type PageTabItem } from '../../shared/ui/PageTabs';
 import { parseDateRangeKey, serverDateRangeColumnFilter } from '../../shared/ui/DateRangeFilter';
 import { antdColumnFilter, externalColumnFilter } from '../../shared/ui/ColumnFilterWindow';
-import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
+import { formatDateRu, formatIsoDayRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { shortenCounterpartyName } from '../../shared/utils/companyShortName';
 import { documentPartyColumns } from '../../shared/ui/documentPartyColumns';
 import { parseCsvIds, toCsvIds } from '../../shared/utils/csvIds';
@@ -573,7 +573,7 @@ export function ExpectedSourceDocsList({
             <Space direction="vertical" size={4} style={{ width: '100%' }}>
               <Space>
                 <Tag color="blue">{r.docNumber ?? '— без номера —'}</Tag>
-                <Typography.Text strong>{r.docDate ?? '—'}</Typography.Text>
+                <Typography.Text strong>{formatIsoDayRu(r.docDate)}</Typography.Text>
                 {r.validation?.hasMismatch ? <MismatchTag v={r.validation} /> : null}
               </Space>
               <Typography.Text type="secondary">

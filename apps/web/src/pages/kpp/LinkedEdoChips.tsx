@@ -1,5 +1,8 @@
 import { useRef, useState, type MouseEvent } from 'react';
-import { Button, Popconfirm, Tag, Tooltip } from 'antd';
+import { Popconfirm, Tooltip } from 'antd';
+import { CloseOutlined, ShareAltOutlined } from '@ant-design/icons';
+import { HeaderChip, HeaderChipAction } from '../../shared/ui/HeaderChip';
+import { formatIsoDayRu } from '../../shared/utils/formatRu';
 import { edoOperatorLabel } from '../shared/edoOperator';
 import { EdoCompareDrawer, type ComparePhoto } from './EdoCompareDrawer';
 
@@ -48,6 +51,10 @@ export function deliveryNumbersText(
  *
  * «К другим приёмкам» (`onShare`) — та же УПД ещё к нескольким приёмкам
  * объекта: одна УПД на несколько машин. Отвязка — только от этой приёмки.
+ *
+ * Вид — общая плашка шапки (HeaderChip): на узком экране переносится только
+ * номер с датой, а «Файл», «К другим приёмкам» и «Отвязать» всегда видны
+ * справа. Последние два — иконки с подсказкой и доступным именем.
  */
 export function LinkedEdoChips({
   deliveryId,
@@ -87,55 +94,59 @@ export function LinkedEdoChips({
   return (
     <>
       {documents.map((document) => (
-        <Tag key={document.id} color="green" style={{ marginInlineEnd: 0 }}>
-          ЭДО{document.operator ? ` · ${edoOperatorLabel(document.operator)}` : ''}:{' '}
-          {document.docNumber ?? 'без номера'}
-          {document.docDate ? ` от ${document.docDate}` : ''}
-          {document.source === 'export' ? ' · XML' : ''}
-          {document.alsoInCount > 0 && (
-            <Tooltip
-              title={`Та же УПД в приёмках: ${deliveryNumbersText(document.alsoIn, document.alsoInCount)}`}
-            >
-              <span>
-                {' · ещё в '}
-                {deliveryNumbersText(document.alsoIn, document.alsoInCount, ALSO_IN_INLINE)}
-              </span>
-            </Tooltip>
-          )}
-          <Button
-            type="link"
-            size="small"
-            style={{ paddingInline: 4 }}
-            onClick={(event) => openFile(document, event)}
-          >
-            Файл
-          </Button>
-          {onShare && (
-            <Button
-              type="link"
-              size="small"
-              style={{ paddingInline: 4 }}
-              onClick={() => onShare(document)}
-            >
-              К другим приёмкам
-            </Button>
-          )}
-          <Popconfirm
-            title={
-              document.alsoInCount > 0
-                ? `Отвязать от этой приёмки? В ${deliveryNumbersText(document.alsoIn, document.alsoInCount)} УПД останется.`
-                : 'Убрать связь с УПД из ЭДО?'
-            }
-            onConfirm={() => onUnlink(document)}
-            okText="Убрать"
-            cancelText="Отмена"
-            disabled={unlinkDisabled}
-          >
-            <Button type="link" size="small" style={{ paddingInline: 4 }}>
-              ×
-            </Button>
-          </Popconfirm>
-        </Tag>
+        <HeaderChip
+          key={document.id}
+          color="green"
+          label={`ЭДО${document.operator ? ` · ${edoOperatorLabel(document.operator)}` : ''}`}
+          value={
+            <>
+              {document.docNumber ?? 'без номера'}
+              {document.docDate ? ` от ${formatIsoDayRu(document.docDate)}` : ''}
+              {document.source === 'export' ? ' · XML' : ''}
+              {document.alsoInCount > 0 && (
+                <Tooltip
+                  title={`Та же УПД в приёмках: ${deliveryNumbersText(document.alsoIn, document.alsoInCount)}`}
+                >
+                  <span>
+                    {' · ещё в '}
+                    {deliveryNumbersText(document.alsoIn, document.alsoInCount, ALSO_IN_INLINE)}
+                  </span>
+                </Tooltip>
+              )}
+            </>
+          }
+          extra={
+            <>
+              <HeaderChipAction onClick={(event) => openFile(document, event)}>
+                Файл
+              </HeaderChipAction>
+              {onShare && (
+                <Tooltip title="К другим приёмкам">
+                  <HeaderChipAction
+                    aria-label="К другим приёмкам"
+                    icon={<ShareAltOutlined />}
+                    onClick={() => onShare(document)}
+                  />
+                </Tooltip>
+              )}
+              <Popconfirm
+                title={
+                  document.alsoInCount > 0
+                    ? `Отвязать от этой приёмки? В ${deliveryNumbersText(document.alsoIn, document.alsoInCount)} УПД останется.`
+                    : 'Убрать связь с УПД из ЭДО?'
+                }
+                onConfirm={() => onUnlink(document)}
+                okText="Убрать"
+                cancelText="Отмена"
+                disabled={unlinkDisabled}
+              >
+                <Tooltip title="Отвязать">
+                  <HeaderChipAction aria-label="Отвязать" icon={<CloseOutlined />} />
+                </Tooltip>
+              </Popconfirm>
+            </>
+          }
+        />
       ))}
       <EdoCompareDrawer
         open={compareOpen}

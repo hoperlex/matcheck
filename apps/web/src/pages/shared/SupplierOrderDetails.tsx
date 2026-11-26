@@ -6,7 +6,7 @@ import type {
   EstimatOrderItemsResponse,
   SupplierOrderCandidateDetail,
 } from '@matcheck/contracts';
-import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { formatIsoDayRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { operationCardUrl } from '../../shared/listMemory';
 import { APPROVAL_STATE_COLORS, approvalText, formatMsk, stageLabel } from '../../shared/utils/estimatOrder';
 
@@ -140,7 +140,7 @@ export function SupplierOrderDetails({
         {o.contractNumber && (
           <Descriptions.Item label="Договор">
             {o.contractNumber}
-            {o.contractDate ? ` от ${o.contractDate}` : ''}
+            {o.contractDate ? ` от ${formatIsoDayRu(o.contractDate)}` : ''}
           </Descriptions.Item>
         )}
         <Descriptions.Item label="Обновлено из EstiMat">{formatMsk(o.lastSeenAt)}</Descriptions.Item>

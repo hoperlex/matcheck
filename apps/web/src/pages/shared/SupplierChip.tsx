@@ -1,9 +1,11 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { Button, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
+import { Button, Select, Space, Spin, Tooltip, Typography, message } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Delivery, Shipment, SourceDocumentDetail, Supplier } from '@matcheck/contracts';
 import { api, ApiError } from '../../services/api';
+import { HeaderChip } from '../../shared/ui/HeaderChip';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
+import { formatIsoDayRu } from '../../shared/utils/formatRu';
 import { upsertServerSnapshot as upsertDeliverySnapshot } from '../../services/deliveries';
 import { upsertServerSnapshot as upsertShipmentSnapshot } from '../../services/shipments';
 import type { UpdSupplierEditTarget } from './updSupplierName';
@@ -183,8 +185,8 @@ export function SupplierChip({
           <Space direction="vertical" size={6} style={{ width: '100%' }}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               Поставщик в УПД №{updEdit.docNumber ?? '—'}
-              {updEdit.docDate ? ` от ${updEdit.docDate}` : ''}. Меняется в самом документе — во
-              всех {operations}, к которым он привязан.
+              {updEdit.docDate ? ` от ${formatIsoDayRu(updEdit.docDate)}` : ''}. Меняется в самом
+              документе — во всех {operations}, к которым он привязан.
             </Typography.Text>
             {updEdit.linkedCount > 1 && (
               <Typography.Text type="warning" style={{ fontSize: 12 }}>
@@ -219,9 +221,11 @@ export function SupplierChip({
   if (hasUpd) {
     return (
       <Tooltip title="Поставщик из УПД — изменить нельзя">
-        <Tag color="default" style={{ marginInlineEnd: 0, cursor: 'help' }}>
-          Поставщик: {displayName ?? '— из УПД —'}
-        </Tag>
+        <HeaderChip
+          label="Поставщик"
+          value={displayName ?? '— из УПД —'}
+          style={{ cursor: 'help' }}
+        />
       </Tooltip>
     );
   }

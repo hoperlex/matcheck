@@ -14,7 +14,6 @@ import {
   Space,
   Spin,
   Switch,
-  Tag,
   Tooltip,
   Typography,
   Upload,
@@ -25,7 +24,6 @@ import {
   ArrowLeftOutlined,
   CameraOutlined,
   DeleteOutlined,
-  LinkOutlined,
   PlusOutlined,
   UndoOutlined,
 } from '@ant-design/icons';
@@ -73,6 +71,12 @@ import { localCacheEnabled } from '../../lib/localCache';
 import { reportPhotoCaptureError } from '../../services/photoCaptureError';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
+import {
+  HeaderAddButton,
+  HeaderChip,
+  HeaderRow,
+  OperationHeader,
+} from '../../shared/ui/HeaderChip';
 import { FlagChip } from '../../shared/ui/FlagChip';
 import { ReviewControls } from '../../shared/ui/ReviewControls';
 import type { PageTabItem } from '../../shared/ui/PageTabs';
@@ -1605,332 +1609,321 @@ export default function ShipmentPage({ embedded = false }: { embedded?: boolean 
             return m ? `МОЛ: ${m.fullName}` : null;
           })();
           return (
-            <Space wrap size={[6, 6]} style={{ marginBottom: 8 }}>
-              <InlineEditChip
-                label="Откуда"
-                value={fromLabel}
-                required
-                disabled={isInspector || isContractor}
-                width={320}
-              >
-                {(close) => (
-                  <Select<string>
-                    autoFocus
-                    style={{ width: '100%' }}
-                    placeholder="Объект"
-                    value={siteId ?? undefined}
-                    onChange={(v) => {
-                      setSiteId(v);
-                      close();
-                    }}
-                    showSearch
-                    optionFilterProp="label"
-                    loading={sitesQuery.isLoading}
-                    options={sites.map((s) => ({
-                      value: s.id,
-                      label: `${s.code} · ${s.name}`,
-                    }))}
-                  />
-                )}
-              </InlineEditChip>
-
-              {kind === 'transfer' && (
+            <OperationHeader>
+              <HeaderRow label="Отгрузка">
                 <InlineEditChip
-                  label="Куда"
-                  value={toLabel}
+                  label="Откуда"
+                  value={fromLabel}
                   required
-                  disabled={isContractor}
+                  disabled={isInspector || isContractor}
                   width={320}
                 >
                   {(close) => (
                     <Select<string>
                       autoFocus
                       style={{ width: '100%' }}
-                      placeholder="Объект-приёмник"
-                      value={destSiteId ?? undefined}
+                      placeholder="Объект"
+                      value={siteId ?? undefined}
                       onChange={(v) => {
-                        setDestSiteId(v);
+                        setSiteId(v);
                         close();
                       }}
                       showSearch
                       optionFilterProp="label"
                       loading={sitesQuery.isLoading}
-                      options={sites
-                        .filter((s) => s.id !== siteId)
-                        .map((s) => ({
-                          value: s.id,
-                          label: `${s.code} · ${s.name}`,
-                        }))}
+                      options={sites.map((s) => ({
+                        value: s.id,
+                        label: `${s.code} · ${s.name}`,
+                      }))}
                     />
                   )}
                 </InlineEditChip>
-              )}
 
-              {(kind === 'contractor' || kind === 'return' || kind === 'transfer') && (
-                <InlineEditChip
-                  label="Получатель"
-                  value={receiverLabel}
-                  required
-                  disabled={isContractor || saveReceiver.isPending}
-                  width={320}
-                  // Режим «сразу»: окно открывается с серверным получателем, а
-                  // закрытое без выбора возвращает его (см. KppPage).
-                  onOpenChange={
-                    receiverImmediate
-                      ? (open) => {
-                          if (open) receiverPickedRef.current = false;
-                          if (!receiverPickedRef.current && !saveReceiver.isPending)
-                            syncReceiverFromServer();
-                        }
-                      : undefined
-                  }
-                >
-                  {(close) => (
-                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                      {kind !== 'return' && (
-                        <Segmented
-                          block
-                          size="small"
-                          options={[
-                            { label: 'Подрядчик', value: 'counterparty' },
-                            { label: 'МОЛ', value: 'mol' },
-                          ]}
-                          value={receiverKind}
-                          onChange={(v) => {
-                            setReceiverKind(v as 'counterparty' | 'mol');
-                            setReceiverId(null);
-                          }}
-                        />
-                      )}
-                      {receiverKind === 'counterparty' && kind !== 'return' ? (
-                        // Справочник заказчика (Справочники → Контрагенты), как
-                        // в приёмке; наружу — операционный id для FK отгрузки.
-                        <CustomerCounterpartySelect
-                          autoFocus
-                          context="shipment"
-                          placeholder="Контрагент"
-                          value={receiverId}
-                          displayName={receiverCounterpartyName}
-                          disabled={!canPickContractor}
-                          onChange={(id, cp) => {
-                            if (id && cp) setPickedReceiver({ id, name: cp.name });
-                            setReceiverId(id);
-                            pickReceiver(id ? { contractorId: id } : { none: true });
-                            close();
-                          }}
-                        />
-                      ) : receiverKind === 'counterparty' ? (
-                        <Select<string>
-                          autoFocus
-                          style={{ width: '100%' }}
-                          placeholder="Поставщик"
-                          value={receiverId ?? undefined}
-                          onChange={(v) => {
-                            setReceiverId(v);
-                            close();
-                          }}
-                          showSearch
-                          optionFilterProp="label"
-                          loading={counterpartiesQuery.isLoading}
-                          options={counterpartyReceiverOptions.map((c) => ({
-                            value: c.id,
-                            label: c.name,
+                {kind === 'transfer' && (
+                  <InlineEditChip
+                    label="Куда"
+                    value={toLabel}
+                    required
+                    disabled={isContractor}
+                    width={320}
+                  >
+                    {(close) => (
+                      <Select<string>
+                        autoFocus
+                        style={{ width: '100%' }}
+                        placeholder="Объект-приёмник"
+                        value={destSiteId ?? undefined}
+                        onChange={(v) => {
+                          setDestSiteId(v);
+                          close();
+                        }}
+                        showSearch
+                        optionFilterProp="label"
+                        loading={sitesQuery.isLoading}
+                        options={sites
+                          .filter((s) => s.id !== siteId)
+                          .map((s) => ({
+                            value: s.id,
+                            label: `${s.code} · ${s.name}`,
                           }))}
-                        />
-                      ) : (
-                        <Select<string>
-                          autoFocus
-                          style={{ width: '100%' }}
-                          placeholder="МОЛ"
-                          value={receiverId ?? undefined}
-                          onChange={(v) => {
-                            setReceiverId(v);
-                            pickReceiver(v ? { recipientMolId: v } : { none: true });
-                            close();
-                          }}
-                          showSearch
-                          optionFilterProp="label"
-                          loading={responsiblePersonsQuery.isLoading}
-                          options={responsiblePersons.map((m) => ({
-                            value: m.id,
-                            label: m.fullName,
-                          }))}
-                        />
-                      )}
-                    </Space>
-                  )}
-                </InlineEditChip>
-              )}
+                      />
+                    )}
+                  </InlineEditChip>
+                )}
 
-              {/* Чип «Поставщик»: симметрично с приёмкой. См. SupplierChip. */}
-              {/* У нового ручного выноса поставщика нет: чип сохраняет отдельным
-                  запросом, а записи на сервере ещё нет (404). */}
-              {loadedShipment && shipmentId && !isManualNew && (
-                <SupplierChip
-                  entity="shipment"
-                  entityId={shipmentId}
-                  hasUpd={(loadedShipment.sourceDocumentIds?.length ?? 0) > 0}
-                  displayName={supplierDisplayName}
-                  invalidateQueryKey={['shipments', shipmentId]}
-                  disabled={!canPickSupplier}
-                />
-              )}
+                {(kind === 'contractor' || kind === 'return' || kind === 'transfer') && (
+                  <InlineEditChip
+                    label="Получатель"
+                    value={receiverLabel}
+                    required
+                    disabled={isContractor || saveReceiver.isPending}
+                    width={320}
+                    // Режим «сразу»: окно открывается с серверным получателем, а
+                    // закрытое без выбора возвращает его (см. KppPage).
+                    onOpenChange={
+                      receiverImmediate
+                        ? (open) => {
+                            if (open) receiverPickedRef.current = false;
+                            if (!receiverPickedRef.current && !saveReceiver.isPending)
+                              syncReceiverFromServer();
+                          }
+                        : undefined
+                    }
+                  >
+                    {(close) => (
+                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                        {kind !== 'return' && (
+                          <Segmented
+                            block
+                            size="small"
+                            options={[
+                              { label: 'Подрядчик', value: 'counterparty' },
+                              { label: 'МОЛ', value: 'mol' },
+                            ]}
+                            value={receiverKind}
+                            onChange={(v) => {
+                              setReceiverKind(v as 'counterparty' | 'mol');
+                              setReceiverId(null);
+                            }}
+                          />
+                        )}
+                        {receiverKind === 'counterparty' && kind !== 'return' ? (
+                          // Справочник заказчика (Справочники → Контрагенты), как
+                          // в приёмке; наружу — операционный id для FK отгрузки.
+                          <CustomerCounterpartySelect
+                            autoFocus
+                            context="shipment"
+                            placeholder="Контрагент"
+                            value={receiverId}
+                            displayName={receiverCounterpartyName}
+                            disabled={!canPickContractor}
+                            onChange={(id, cp) => {
+                              if (id && cp) setPickedReceiver({ id, name: cp.name });
+                              setReceiverId(id);
+                              pickReceiver(id ? { contractorId: id } : { none: true });
+                              close();
+                            }}
+                          />
+                        ) : receiverKind === 'counterparty' ? (
+                          <Select<string>
+                            autoFocus
+                            style={{ width: '100%' }}
+                            placeholder="Поставщик"
+                            value={receiverId ?? undefined}
+                            onChange={(v) => {
+                              setReceiverId(v);
+                              close();
+                            }}
+                            showSearch
+                            optionFilterProp="label"
+                            loading={counterpartiesQuery.isLoading}
+                            options={counterpartyReceiverOptions.map((c) => ({
+                              value: c.id,
+                              label: c.name,
+                            }))}
+                          />
+                        ) : (
+                          <Select<string>
+                            autoFocus
+                            style={{ width: '100%' }}
+                            placeholder="МОЛ"
+                            value={receiverId ?? undefined}
+                            onChange={(v) => {
+                              setReceiverId(v);
+                              pickReceiver(v ? { recipientMolId: v } : { none: true });
+                              close();
+                            }}
+                            showSearch
+                            optionFilterProp="label"
+                            loading={responsiblePersonsQuery.isLoading}
+                            options={responsiblePersons.map((m) => ({
+                              value: m.id,
+                              label: m.fullName,
+                            }))}
+                          />
+                        )}
+                      </Space>
+                    )}
+                  </InlineEditChip>
+                )}
 
-              {isManualEntry && (
-                <Tag color="cyan" style={{ marginInlineEnd: 0 }}>
-                  Ручной вынос
-                </Tag>
-              )}
+                {/* Чип «Поставщик»: симметрично с приёмкой. См. SupplierChip. */}
+                {/* У нового ручного выноса поставщика нет: чип сохраняет отдельным
+                    запросом, а записи на сервере ещё нет (404). */}
+                {loadedShipment && shipmentId && !isManualNew && (
+                  <SupplierChip
+                    entity="shipment"
+                    entityId={shipmentId}
+                    hasUpd={(loadedShipment.sourceDocumentIds?.length ?? 0) > 0}
+                    displayName={supplierDisplayName}
+                    invalidateQueryKey={['shipments', shipmentId]}
+                    disabled={!canPickSupplier}
+                  />
+                )}
 
-              {!isManualNew && (
+                {isManualEntry && <HeaderChip color="cyan">Ручной вынос</HeaderChip>}
+
+                {!isManualNew && (
+                  <InlineEditChip
+                    label="Госномер"
+                    value={plate || null}
+                    placeholder={isManualEntry ? '— без машины —' : '— не указан —'}
+                    disabled={isContractor}
+                    width={200}
+                  >
+                    {(close) => (
+                      <Input
+                        autoFocus
+                        size="small"
+                        placeholder="А123ВВ77"
+                        value={plate}
+                        onChange={(e) => setPlate(e.target.value.toUpperCase())}
+                        onPressEnter={close}
+                        onBlur={close}
+                        autoCapitalize="characters"
+                      />
+                    )}
+                  </InlineEditChip>
+                )}
+
+                {!isManualNew && (
+                  <InlineEditChip
+                    label="Водитель"
+                    value={driverName || null}
+                    placeholder="— не указан —"
+                    disabled={isContractor}
+                    width={260}
+                  >
+                    {(close) => (
+                      <Input
+                        autoFocus
+                        size="small"
+                        placeholder="ФИО"
+                        value={driverName}
+                        onChange={(e) => setDriverName(e.target.value)}
+                        onPressEnter={close}
+                        onBlur={close}
+                      />
+                    )}
+                  </InlineEditChip>
+                )}
+              </HeaderRow>
+              <HeaderRow label="Документы">
+                {/* Документы отгрузки — read-only чипы: номера всех связанных
+                    через запятую по видам, даты и сумма — по всем сразу.
+                    Зеркало приёмки (см. KppPage и OperationDocumentsChips):
+                    раньше здесь показывался только sourceDocumentIds[0]. */}
+                {linkedDocuments.length > 0 ? (
+                  <OperationDocumentsChips
+                    documents={linkedDocuments}
+                    onUnlink={
+                      canUnlinkUpd
+                        ? (doc, { deleteItems }) => unlinkUpd.mutate({ doc, deleteItems })
+                        : undefined
+                    }
+                    itemCountByDocumentId={itemCountByDocumentId}
+                    unlinkPending={unlinkUpd.isPending}
+                  />
+                ) : offlineDocumentCount > 0 ? (
+                  // Офлайн-снимок от /sync сводку документов не содержит.
+                  <HeaderChip label="Документов" value={offlineDocumentCount} strong={false} />
+                ) : (
+                  <HeaderChip>— без УПД —</HeaderChip>
+                )}
+                {/* «Документ» — добавить ещё одну УПД или накладную. Раньше кнопка
+                    исчезала, как только был привязан хоть один документ. */}
+                {!isInspector && !isContractor && !isNew && (
+                  <HeaderAddButton
+                    onClick={() => {
+                      setLinkUpdError(null);
+                      setLinkUpdOpen(true);
+                    }}
+                  >
+                    + Документ
+                  </HeaderAddButton>
+                )}
+              </HeaderRow>
+              <HeaderRow label="Учёт">
+                {/* «Тип отгрузки» — серверное поле shipments.purpose (миграция
+                    0050). Заполняет инспектор с мобилы в dropdown'е на форме
+                    «Новая отгрузка»; менеджер может править. 4 фиксированных
+                    значения см. PURPOSE_OPTIONS. */}
                 <InlineEditChip
-                  label="Госномер"
-                  value={plate || null}
-                  placeholder={isManualEntry ? '— без машины —' : '— не указан —'}
-                  disabled={isContractor}
-                  width={200}
-                >
-                  {(close) => (
-                    <Input
-                      autoFocus
-                      size="small"
-                      placeholder="А123ВВ77"
-                      value={plate}
-                      onChange={(e) => setPlate(e.target.value.toUpperCase())}
-                      onPressEnter={close}
-                      onBlur={close}
-                      autoCapitalize="characters"
-                    />
-                  )}
-                </InlineEditChip>
-              )}
-
-              {!isManualNew && (
-                <InlineEditChip
-                  label="Водитель"
-                  value={driverName || null}
+                  label="Тип отгрузки"
+                  value={purpose}
                   placeholder="— не указан —"
                   disabled={isContractor}
                   width={260}
                 >
                   {(close) => (
-                    <Input
+                    <Select
                       autoFocus
                       size="small"
-                      placeholder="ФИО"
-                      value={driverName}
-                      onChange={(e) => setDriverName(e.target.value)}
-                      onPressEnter={close}
-                      onBlur={close}
+                      style={{ width: '100%' }}
+                      value={purpose}
+                      placeholder="Выберите тип"
+                      allowClear
+                      onChange={(v) => {
+                        setPurpose(v ?? null);
+                        close();
+                      }}
+                      options={PURPOSE_OPTIONS.map((p) => ({ label: p, value: p }))}
                     />
                   )}
                 </InlineEditChip>
-              )}
 
-              {/* «Тип отгрузки» — серверное поле shipments.purpose (миграция
-                  0050). Заполняет инспектор с мобилы в dropdown'е на форме
-                  «Новая отгрузка»; менеджер может править. 4 фиксированных
-                  значения см. PURPOSE_OPTIONS. */}
-              <InlineEditChip
-                label="Тип отгрузки"
-                value={purpose}
-                placeholder="— не указан —"
-                disabled={isContractor}
-                width={260}
-              >
-                {(close) => (
-                  <Select
-                    autoFocus
-                    size="small"
-                    style={{ width: '100%' }}
-                    value={purpose}
-                    placeholder="Выберите тип"
-                    allowClear
-                    onChange={(v) => {
-                      setPurpose(v ?? null);
-                      close();
-                    }}
-                    options={PURPOSE_OPTIONS.map((p) => ({ label: p, value: p }))}
+                {/* Транзит — admin/manager могут поставить/снять прямо
+                    с портала (PATCH /shipments/:id/flags). Inspector_kpp
+                    видит только цветной чип при true и не правит — у него
+                    есть чекбокс «Транзит» на 1 этапе мобилы.
+                    См. миграцию 0051 + FlagChip. */}
+                {loadedShipment && !isManualNew && (
+                  <FlagChip
+                    label="Транзит"
+                    emoji="🚚"
+                    color="orange"
+                    value={loadedShipment.inTransit}
+                    disabled={isInspector || isContractor || patchFlags.isPending}
+                    loading={patchFlags.isPending}
+                    onChange={(next) => patchFlags.mutate({ inTransit: next })}
                   />
                 )}
-              </InlineEditChip>
-
-              {/* Транзит — admin/manager могут поставить/снять прямо
-                  с портала (PATCH /shipments/:id/flags). Inspector_kpp
-                  видит только цветной чип при true и не правит — у него
-                  есть чекбокс «Транзит» на 1 этапе мобилы.
-                  См. миграцию 0051 + FlagChip. */}
-              {loadedShipment && !isManualNew && (
-                <FlagChip
-                  label="Транзит"
-                  emoji="🚚"
-                  color="orange"
-                  value={loadedShipment.inTransit}
-                  disabled={isInspector || isContractor || patchFlags.isPending}
-                  loading={patchFlags.isPending}
-                  onChange={(next) => patchFlags.mutate({ inTransit: next })}
-                />
-              )}
-              {/* ОС — флаг «основные средства», рядом с Транзитом.
-                  Источник — чекбокс «ОС» на 1 этапе мобилы. См. миграцию
-                  0065. */}
-              {loadedShipment && !isManualNew && (
-                <FlagChip
-                  label="ОС"
-                  emoji="📦"
-                  color="purple"
-                  value={loadedShipment.isAssets}
-                  disabled={isInspector || isContractor || patchFlags.isPending}
-                  loading={patchFlags.isPending}
-                  onChange={(next) => patchFlags.mutate({ isAssets: next })}
-                />
-              )}
-
-              {/* Документы отгрузки — read-only чипы: номера всех связанных
-                  через запятую по видам, даты и сумма — по всем сразу.
-                  Зеркало приёмки (см. KppPage и OperationDocumentsChips):
-                  раньше здесь показывался только sourceDocumentIds[0]. */}
-              {linkedDocuments.length > 0 ? (
-                <OperationDocumentsChips
-                  documents={linkedDocuments}
-                  onUnlink={
-                    canUnlinkUpd
-                      ? (doc, { deleteItems }) => unlinkUpd.mutate({ doc, deleteItems })
-                      : undefined
-                  }
-                  itemCountByDocumentId={itemCountByDocumentId}
-                  unlinkPending={unlinkUpd.isPending}
-                />
-              ) : offlineDocumentCount > 0 ? (
-                // Офлайн-снимок от /sync сводку документов не содержит.
-                <Tag style={{ marginInlineEnd: 0 }}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    Документов: {offlineDocumentCount}
-                  </Typography.Text>
-                </Tag>
-              ) : (
-                <Tag style={{ marginInlineEnd: 0 }}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    — без УПД —
-                  </Typography.Text>
-                </Tag>
-              )}
-              {/* «Документ» — добавить ещё одну УПД или накладную. Раньше кнопка
-                  исчезала, как только был привязан хоть один документ. */}
-              {!isInspector && !isContractor && !isNew && (
-                <Button
-                  size="small"
-                  type="dashed"
-                  icon={<LinkOutlined />}
-                  onClick={() => {
-                    setLinkUpdError(null);
-                    setLinkUpdOpen(true);
-                  }}
-                >
-                  Документ
-                </Button>
-              )}
-            </Space>
+                {/* ОС — флаг «основные средства», рядом с Транзитом.
+                    Источник — чекбокс «ОС» на 1 этапе мобилы. См. миграцию
+                    0065. */}
+                {loadedShipment && !isManualNew && (
+                  <FlagChip
+                    label="ОС"
+                    emoji="📦"
+                    color="purple"
+                    value={loadedShipment.isAssets}
+                    disabled={isInspector || isContractor || patchFlags.isPending}
+                    loading={patchFlags.isPending}
+                    onChange={(next) => patchFlags.mutate({ isAssets: next })}
+                  />
+                )}
+              </HeaderRow>
+            </OperationHeader>
           );
         })()}
 

@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Delivery } from '@matcheck/contracts';
 import { DocumentRecipientChips } from './DocumentRecipientChips';
+import { chipText } from '../../test/chipText';
 
 const DOC = '11111111-1111-4111-8111-111111111111';
 const CONTRACTOR = '22222222-2222-4222-8222-222222222222';
@@ -34,8 +35,8 @@ describe('чипы получателя и признака УПД', () => {
         onPurpose={vi.fn()}
       />,
     );
-    expect(screen.getByText(/Получатель: как у приёмки: МОЛ: Иванов Иван/)).toBeTruthy();
-    expect(screen.getByText(/Признак: как у приёмки: Свои силы/)).toBeTruthy();
+    expect(screen.getByText(chipText(/Получатель: как у приёмки: МОЛ: Иванов Иван/))).toBeTruthy();
+    expect(screen.getByText(chipText(/Признак: как у приёмки: Свои силы/))).toBeTruthy();
   });
 
   it('собственный NULL не подменяется общим признаком', () => {
@@ -67,9 +68,9 @@ describe('чипы получателя и признака УПД', () => {
         onPurpose={vi.fn()}
       />,
     );
-    expect(screen.getByText(/Получатель: Подрядчик: ООО Подрядчик/)).toBeTruthy();
-    expect(screen.getByText(/Признак: — не выбран/)).toBeTruthy();
-    expect(screen.queryByText(/Признак: как у приёмки/)).toBeNull();
+    expect(screen.getByText(chipText(/Получатель: Подрядчик: ООО Подрядчик/))).toBeTruthy();
+    expect(screen.getByText(chipText(/Признак: — не выбран/))).toBeTruthy();
+    expect(screen.queryByText(chipText(/Признак: как у приёмки/))).toBeNull();
   });
 
   it('для своего подрядчика не предлагает «Свои силы» и не даёт наследовать конфликтный общий признак', async () => {
@@ -102,7 +103,7 @@ describe('чипы получателя и признака УПД', () => {
         onPurpose={onPurpose}
       />,
     );
-    fireEvent.click(screen.getByText(/Признак: — не выбран/));
+    fireEvent.click(screen.getByText(chipText(/Признак: — не выбран/)));
     await waitFor(() => expect(screen.getAllByRole('menuitem').length).toBeGreaterThan(0));
     expect(screen.queryByText('1 Свои силы')).toBeNull();
     expect(
@@ -159,9 +160,9 @@ describe('чипы получателя и признака УПД', () => {
         onPurpose={onPurpose}
       />,
     );
-    expect(screen.getByText(/Получатель: Подрядчик: ООО КС/)).toBeTruthy();
+    expect(screen.getByText(chipText(/Получатель: Подрядчик: ООО КС/))).toBeTruthy();
     expect(screen.queryByText(/Чужой скан/)).toBeNull();
-    fireEvent.click(screen.getByText(/Признак: Давальческий акт/));
+    fireEvent.click(screen.getByText(chipText(/Признак: Давальческий акт/)));
     await waitFor(() => expect(screen.getAllByRole('menuitem').length).toBeGreaterThan(0));
     fireEvent.click(screen.getByText('2 Реализация'));
     expect(onPurpose).toHaveBeenCalledWith({ purpose: 'realization' });

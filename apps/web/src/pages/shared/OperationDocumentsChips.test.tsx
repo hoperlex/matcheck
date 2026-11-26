@@ -6,10 +6,11 @@
  * в шапке был номер одной и «Сумма: 776 240 ₽» — итог этой одной бумаги вместо
  * 2 523 656 ₽ по всем.
  */
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EdoSummary, OperationSourceDocument } from '@matcheck/contracts';
 import { OperationDocumentsChips } from './OperationDocumentsChips';
+import { chipText } from '../../test/chipText';
 
 const doc = (over: Partial<OperationSourceDocument> = {}): OperationSourceDocument => ({
   id: 'd1',
@@ -40,15 +41,15 @@ describe('OperationDocumentsChips', () => {
     expect(screen.getByText(/0000-0082603, 0000-0082604, 0000-0082605/)).toBeTruthy();
     // Четвёртый номер свёрнут в «+1», полный список — в поповере по клику.
     expect(screen.getByText(/\+1/)).toBeTruthy();
-    expect(screen.getByText(/Сумма по документам: 2 523 656,00/)).toBeTruthy();
+    expect(screen.getByText(chipText(/Сумма по документам: 2 523 656,00/))).toBeTruthy();
   });
 
   it('один документ — подпись «Сумма», как раньше', () => {
     render(<OperationDocumentsChips documents={[doc()]} />);
 
-    expect(screen.getByText(/^Сумма: 747 171,00/)).toBeTruthy();
-    expect(screen.getByText('Дата документа: 2026-08-26')).toBeTruthy();
-    expect(screen.getByText('Дата поставки: 2026-08-28')).toBeTruthy();
+    expect(screen.getByText(chipText(/^Сумма: 747 171,00/))).toBeTruthy();
+    expect(screen.getByText(chipText('Дата документа: 26.08.2026'))).toBeTruthy();
+    expect(screen.getByText(chipText('Дата поставки: 28.08.2026'))).toBeTruthy();
   });
 
   it('разные даты дают диапазон, а неполные — честную приписку', () => {
@@ -62,9 +63,19 @@ describe('OperationDocumentsChips', () => {
       />,
     );
 
-    expect(screen.getByText('Дата документа: 2026-08-26 — 2026-08-27 · у 2 из 3')).toBeTruthy();
+    expect(
+      screen.getByText(chipText('Дата документа: 26.08.2026 — 27.08.2026 · у 2 из 3')),
+    ).toBeTruthy();
     // Отсутствующая сумма не считается нулём — об этом сказано прямо.
     expect(screen.getByText(/сумма указана у 2 из 3/)).toBeTruthy();
+  });
+
+  it('в списке документов по клику дата тоже дд.мм.гггг', () => {
+    render(<OperationDocumentsChips documents={[doc()]} />);
+    fireEvent.click(screen.getByText('0000-0082603'));
+    const popover = document.querySelector<HTMLElement>('.ant-popover')!;
+    expect(within(popover).getByText('26.08.2026')).toBeTruthy();
+    expect(screen.queryByText('2026-08-26')).toBeNull();
   });
 
   it('накладная подписана накладной, а не УПД', () => {
@@ -336,8 +347,8 @@ describe('OperationDocumentsChips — УПД из ЭДО', () => {
     expect(screen.getByText('УПД из ЭДО:')).toBeTruthy();
     expect(screen.getByText('14622014')).toBeTruthy();
     expect(screen.queryByText('22735030 / SX')).toBeNull();
-    expect(screen.getByText(/^Сумма по ЭДО: 15 963,82/)).toBeTruthy();
-    expect(screen.getByText('Дата документа: 2026-11-16')).toBeTruthy();
+    expect(screen.getByText(chipText(/^Сумма по ЭДО: 15 963,82/))).toBeTruthy();
+    expect(screen.getByText(chipText('Дата документа: 16.11.2026'))).toBeTruthy();
     // Совпало со сканом — пометки нет.
     expect(screen.queryByText(/по скану/)).toBeNull();
   });
@@ -367,7 +378,7 @@ describe('OperationDocumentsChips — УПД из ЭДО', () => {
         })}
       />,
     );
-    expect(screen.getByText(/^Сумма по ЭДО: 2 323 906,09/)).toBeTruthy();
+    expect(screen.getByText(chipText(/^Сумма по ЭДО: 2 323 906,09/))).toBeTruthy();
     expect(screen.getByText(/по скану 156 336,00/)).toBeTruthy();
   });
 
@@ -379,7 +390,9 @@ describe('OperationDocumentsChips — УПД из ЭДО', () => {
       />,
     );
     expect(screen.getByText('14622014')).toBeTruthy();
-    expect(screen.getByText(/Сумма по ЭДО: 15 963,82 .* · УПД на 3 приёмки/)).toBeTruthy();
+    expect(
+      screen.getByText(chipText(/Сумма по ЭДО: 15 963,82 .* · УПД на 3 приёмки/)),
+    ).toBeTruthy();
   });
 
   it('скан без пары остаётся в чипах, подпись — «по документам»', () => {
@@ -394,6 +407,6 @@ describe('OperationDocumentsChips — УПД из ЭДО', () => {
       />,
     );
     expect(screen.getByText('ТН-7')).toBeTruthy();
-    expect(screen.getByText(/^Сумма по документам: 16 063,82/)).toBeTruthy();
+    expect(screen.getByText(chipText(/^Сумма по документам: 16 063,82/))).toBeTruthy();
   });
 });

@@ -151,17 +151,17 @@ describe('закрытие панели', () => {
   });
 });
 
-describe('«×»', () => {
+describe('«Отвязать» (×)', () => {
   it('после подтверждения снимает связь именно этого документа', async () => {
     const props = show();
-    fireEvent.click(screen.getAllByRole('button', { name: '×' })[1]!);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Отвязать' })[1]!);
     fireEvent.click(await screen.findByRole('button', { name: 'Убрать' }));
     expect(props.onUnlink).toHaveBeenCalledWith(imported);
   });
 
   it('пока идёт другая операция, подтверждение не открывается', () => {
     const props = show({ unlinkDisabled: true });
-    fireEvent.click(screen.getAllByRole('button', { name: '×' })[0]!);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Отвязать' })[0]!);
     expect(screen.queryByRole('button', { name: 'Убрать' })).toBeNull();
     expect(props.onUnlink).not.toHaveBeenCalled();
   });
@@ -207,9 +207,9 @@ describe('оператор ЭДО в чипе', () => {
         { ...exported, id: 'm-old', docNumber: '5555' },
       ],
     });
-    expect(screen.getByText(/ЭДО · СБИС:/).textContent).toContain('3180');
-    expect(screen.getByText(/ЭДО · Диадок:/).textContent).toContain('77');
-    expect(screen.getByText(/^ЭДО:/).textContent).toContain('5555');
+    expect(screen.getByText(/ЭДО · СБИС:/).closest('.mc-chip')?.textContent).toContain('3180');
+    expect(screen.getByText(/ЭДО · Диадок:/).closest('.mc-chip')?.textContent).toContain('77');
+    expect(screen.getByText(/^ЭДО:/).closest('.mc-chip')?.textContent).toContain('5555');
   });
 });
 
@@ -230,7 +230,7 @@ describe('«К другим приёмкам»', () => {
         { ...exported, alsoIn: [{ deliveryId: 'x1', displayId: 21041 }], alsoInCount: 1 },
       ],
     });
-    fireEvent.click(screen.getByRole('button', { name: '×' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Отвязать' }));
     expect(
       await screen.findByText('Отвязать от этой приёмки? В 21041 УПД останется.'),
     ).toBeTruthy();

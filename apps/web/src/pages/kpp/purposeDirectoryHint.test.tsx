@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * Подсказка «Признака» по справочнику «Объекты и вид» в карточке приёмки (0161):
- *   - поставил справочник → «📒 по справочнику», кнопка в цвете вида;
+ *   - поставил справочник → кнопка в цвете вида, отдельной надписи нет;
  *   - человек выбрал то же → «✓ совпадает со справочником»;
  *   - выбрано другое или пусто → серым «справочник: …»; «оба вида» — два пункта;
  *   - пункты меню из справочника помечены, остальные — без пометки.
@@ -43,11 +43,10 @@ describe('purposeDirectoryState', () => {
 });
 
 describe('PurposeDirectoryMark', () => {
-  it('подставлен справочником — цветная метка', () => {
+  it('подставлен справочником — надписи нет, говорит цвет кнопки', () => {
     render(<PurposeDirectoryMark hint={tolling} state="auto" />);
-    const mark = screen.getByTestId('purpose-directory-mark');
-    expect(mark.textContent).toBe('📒 по справочнику');
-    expect(mark.className).toContain('ant-tag-orange');
+    expect(screen.queryByTestId('purpose-directory-mark')).toBeNull();
+    expect(screen.queryByText(/по справочнику/)).toBeNull();
   });
 
   it('выбран тот же — «совпадает со справочником»', () => {

@@ -14,6 +14,7 @@ import type { Delivery } from '@matcheck/contracts';
 import type * as ApiModuleNs from '../../services/api';
 import { api } from '../../services/api';
 import type * as DeliveriesModuleNs from '../../services/deliveries';
+import { chipText } from '../../test/chipText';
 
 const mocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
@@ -470,7 +471,7 @@ describe('режим получателей: УПД из ЭДО без скан�
     expect(chips.map((c) => c.textContent)).toEqual([expect.stringContaining('202/ЦМос3/4622-2025-ДОМ56')]);
     expect(await screen.findAllByTestId('document-contract-add')).toHaveLength(1);
     // Признак второй УПД — PATCH на её связь, не на скан.
-    const purposeTags = await screen.findAllByText(/Признак: как у приёмки/);
+    const purposeTags = await screen.findAllByText(chipText(/Признак: как у приёмки/));
     fireEvent.click(purposeTags[purposeTags.length - 1]!);
     fireEvent.click(await screen.findByText('2 Реализация'));
     await waitFor(() =>

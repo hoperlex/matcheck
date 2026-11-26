@@ -8,6 +8,7 @@ import { formatStageTime } from '../kpp/stageTime';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
+import { HeaderChip, HeaderRow, OperationHeader } from '../../shared/ui/HeaderChip';
 import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { useColumnTools, type ToolColumn } from '../../shared/ui/columnTools';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
@@ -40,6 +41,9 @@ const KIND_LABELS: Record<ShipmentKind, { label: string; color: string }> = {
  * DeliveryViewModal — UX симметричный: те же чипы шапки, Collapse «Фото»
  * с разделением «1 Этап / 2 Этап» (поле stage у shipment_photos
  * введено миграцией 0048), таблица материалов без горизонтального скролла.
+ *
+ * В заголовке — номер, состояние записи и вид; плашки — теми же рядами, что
+ * в редакторе (OperationHeader), первым блоком.
  */
 export function ShipmentViewModal({
   data,
@@ -122,7 +126,9 @@ export function ShipmentViewModal({
       width="97vw"
       title={
         s && data ? (
-          <Space size={4} wrap style={{ fontSize: 12 }}>
+          <Space size={6} wrap style={{ fontSize: 12 }}>
+            {/* Номер — как в заголовке редактора («Отгрузка 1234»). */}
+            <Typography.Text strong>Отгрузка {s.displayId}</Typography.Text>
             <Tag style={{ marginInlineEnd: 0 }} color={s.status.color ?? 'default'}>
               {s.status.label}
             </Tag>
@@ -130,54 +136,6 @@ export function ShipmentViewModal({
             <Tag color={KIND_LABELS[s.kind].color} style={{ marginInlineEnd: 0 }}>
               {KIND_LABELS[s.kind].label}
             </Tag>
-            {s.sourceDocumentIds.length === 0 && (
-              <Tag style={{ marginInlineEnd: 0 }} color="gold">
-                Без документа
-              </Tag>
-            )}
-            {data.docKindLabel ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="blue">
-                {data.docKindLabel}
-                {data.docNumber ? ` №${data.docNumber}` : ''}
-              </Tag>
-            ) : null}
-            {data.siteName ? (
-              <Tag style={{ marginInlineEnd: 0 }}>Объект: {data.siteName}</Tag>
-            ) : null}
-            {data.receiverName ? (
-              <Tag style={{ marginInlineEnd: 0 }}>Получатель: {data.receiverName}</Tag>
-            ) : null}
-            {data.destSiteName ? (
-              <Tag style={{ marginInlineEnd: 0 }}>На объект: {data.destSiteName}</Tag>
-            ) : null}
-            {s.isManual ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="cyan">
-                Ручной вынос
-              </Tag>
-            ) : null}
-            {s.vehiclePlate ? (
-              <Tag style={{ marginInlineEnd: 0 }}>Авто: {s.vehiclePlate}</Tag>
-            ) : null}
-            {s.purpose ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="cyan">
-                Тип отгрузки: {s.purpose}
-              </Tag>
-            ) : null}
-            {s.inTransit ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="orange">
-                🚚 Транзит
-              </Tag>
-            ) : null}
-            {s.isAssets ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="purple">
-                📦 ОС
-              </Tag>
-            ) : null}
-            {data.docTotalSum != null ? (
-              <Tag style={{ marginInlineEnd: 0 }}>
-                Сумма: {formatMoneyRu(data.docTotalSum)}
-              </Tag>
-            ) : null}
             <PendingDeletionTag
               at={s.pendingDeletionAt}
               byEmail={s.pendingDeletionByUserEmail}
@@ -216,6 +174,35 @@ export function ShipmentViewModal({
     >
       {s ? (
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <OperationHeader style={{ marginBottom: 0 }}>
+            <HeaderRow label="Отгрузка">
+              {data?.siteName && <HeaderChip label="Объект" value={data.siteName} />}
+              {data?.receiverName && <HeaderChip label="Получатель" value={data.receiverName} />}
+              {data?.destSiteName && <HeaderChip label="На объект" value={data.destSiteName} />}
+              {s.isManual && <HeaderChip color="cyan">Ручной вынос</HeaderChip>}
+              {s.vehiclePlate && <HeaderChip label="Авто" value={s.vehiclePlate} />}
+            </HeaderRow>
+            <HeaderRow label="Документы">
+              {s.sourceDocumentIds.length === 0 && (
+                <HeaderChip color="gold">Без документа</HeaderChip>
+              )}
+              {data?.docKindLabel && (
+                <HeaderChip
+                  color="blue"
+                  label={data.docKindLabel}
+                  value={data.docNumber ?? '— без номера —'}
+                />
+              )}
+              {data?.docTotalSum != null && (
+                <HeaderChip label="Сумма" value={formatMoneyRu(data.docTotalSum)} />
+              )}
+            </HeaderRow>
+            <HeaderRow label="Учёт">
+              {s.purpose && <HeaderChip color="cyan" label="Тип отгрузки" value={s.purpose} />}
+              {s.inTransit && <HeaderChip color="orange">🚚 Транзит</HeaderChip>}
+              {s.isAssets && <HeaderChip color="purple">📦 ОС</HeaderChip>}
+            </HeaderRow>
+          </OperationHeader>
           <Space wrap>
             <Typography.Text>
               <b>Отгрузка:</b>{' '}

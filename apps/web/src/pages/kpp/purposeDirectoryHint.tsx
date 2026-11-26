@@ -1,6 +1,8 @@
 // Подсказка «Признака» по справочнику «Контрагенты → Объекты и вид» в карточке
 // приёмки (миграция 0161, domain/operations/delivery-purpose.ts на сервере).
-//   - признак поставил справочник → «📒 по справочнику», кнопка в цвете вида;
+//   - признак поставил справочник → кнопка в цвете вида, без отдельной надписи
+//     (надпись «📒 по справочнику» рядом с кнопкой убрана по просьбе владельца
+//     26.11.2026: цвет кнопки уже говорит, откуда признак);
 //   - человек выбрал то же, что в справочнике → «✓ совпадает со справочником»;
 //   - иначе (выбрано другое или пусто) → серым «справочник: …»;
 //   - в меню пункты из справочника помечены «📒 по справочнику».
@@ -48,7 +50,7 @@ function hintTitle(hint: DeliveryPurposeHint): string {
   );
 }
 
-/** Отметка рядом с кнопкой «Признак». */
+/** Отметка рядом с кнопкой «Признак»: только когда выбор человека расходится со справочником или совпал с ним. */
 export function PurposeDirectoryMark({
   hint,
   state,
@@ -56,25 +58,17 @@ export function PurposeDirectoryMark({
   hint: DeliveryPurposeHint | null | undefined;
   state: PurposeDirectoryState;
 }) {
-  if (!hint || state === 'none') return null;
+  // Признак поставил справочник — кнопка и так в цвете вида, надпись лишняя.
+  if (!hint || state === 'none' || state === 'auto') return null;
   const title = hintTitle(hint);
-  if (state === 'auto') {
-    return (
-      <Tooltip title={title}>
-        <Tag
-          color={CONTRACTOR_SITE_KIND_COLORS[hint.kind]}
-          style={{ marginInlineEnd: 0 }}
-          data-testid="purpose-directory-mark"
-        >
-          📒 по справочнику
-        </Tag>
-      </Tooltip>
-    );
-  }
   if (state === 'match') {
     return (
       <Tooltip title={title}>
-        <Typography.Text type="secondary" data-testid="purpose-directory-mark">
+        <Typography.Text
+          type="secondary"
+          style={{ fontSize: 12 }}
+          data-testid="purpose-directory-mark"
+        >
           ✓ совпадает со справочником
         </Typography.Text>
       </Tooltip>
@@ -85,7 +79,11 @@ export function PurposeDirectoryMark({
     .join(' / ');
   return (
     <Tooltip title={title}>
-      <Typography.Text type="secondary" data-testid="purpose-directory-mark">
+      <Typography.Text
+        type="secondary"
+        style={{ fontSize: 12 }}
+        data-testid="purpose-directory-mark"
+      >
         справочник: {labels}
       </Typography.Text>
     </Tooltip>

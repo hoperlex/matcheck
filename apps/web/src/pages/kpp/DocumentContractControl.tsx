@@ -1,5 +1,6 @@
-import { Button, Tooltip } from 'antd';
+import { Tooltip } from 'antd';
 import type { DeliveryContract } from '@matcheck/contracts';
+import { HeaderAddButton } from '../../shared/ui/HeaderChip';
 import { contractShortLabel } from '../../shared/utils/supplierContract';
 import { ContractChip } from './ContractChip';
 
@@ -47,9 +48,9 @@ export function DocumentContractControl({
     : 'Общий договор приёмки не выбран';
   return (
     <Tooltip title={hint}>
-      <Button size="small" type="dashed" onClick={onPick} data-testid="document-contract-add">
+      <HeaderAddButton onClick={onPick} data-testid="document-contract-add">
         + Договор
-      </Button>
+      </HeaderAddButton>
     </Tooltip>
   );
 }

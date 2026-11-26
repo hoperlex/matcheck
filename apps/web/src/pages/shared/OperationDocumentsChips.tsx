@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { Button, Checkbox, Popconfirm, Popover, Space, Tag, Tooltip, Typography } from 'antd';
+import { Button, Checkbox, Popconfirm, Popover, Space, Tooltip, Typography } from 'antd';
 import { DisconnectOutlined, EyeOutlined, WarningOutlined } from '@ant-design/icons';
 import type { EdoSummary, OperationSourceDocument } from '@matcheck/contracts';
-import { formatMoneyRu } from '../../shared/utils/formatRu';
+import { HeaderChip } from '../../shared/ui/HeaderChip';
+import { formatIsoDayRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import {
   edoDateSources,
   edoHeaderSumHint,
@@ -15,6 +16,7 @@ import {
   groupDocumentsByKind,
   summarizeDates,
   sumDocumentTotals,
+  type DateSummary,
 } from '../../shared/utils/operationDocumentsSummary';
 import { sourceKindLabel } from '../../shared/utils/sourceKindLabel';
 
@@ -43,6 +45,13 @@ const EDO_GROUP = '__edo__';
 
 function docLabel(doc: OperationSourceDocument): string {
   return doc.docNumber ?? '— без номера —';
+}
+
+/** «25.11.2026» или «24.11.2026 — 25.11.2026»: форматируются обе границы. */
+function dateRangeRu(summary: DateSummary): string {
+  return summary.first === summary.last
+    ? formatIsoDayRu(summary.first)
+    : `${formatIsoDayRu(summary.first)} — ${formatIsoDayRu(summary.last)}`;
 }
 
 /** Выбор человека в окне «Отвязать документ?». */
@@ -154,7 +163,7 @@ export function OperationDocumentsChips({
           )}
           {doc.docDate && (
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {doc.docDate}
+              {formatIsoDayRu(doc.docDate)}
             </Typography.Text>
           )}
           {doc.totalSum && (
@@ -196,18 +205,15 @@ export function OperationDocumentsChips({
 
   const edoNumbers = edoSummary?.documents.map((doc) => doc.docNumber ?? 'без номера') ?? [];
   const edoChip = edoSummary && (
-    <Tag
+    <HeaderChip
       color="blue"
-      style={{ marginInlineEnd: 0, cursor: documents.length ? 'pointer' : 'default' }}
-    >
-      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-        УПД из ЭДО:
-      </Typography.Text>{' '}
-      <Typography.Text strong style={{ fontSize: 12 }}>
-        {edoNumbers.slice(0, INLINE_NUMBERS).join(', ')}
-        {edoNumbers.length > INLINE_NUMBERS ? ` +${edoNumbers.length - INLINE_NUMBERS}` : ''}
-      </Typography.Text>
-    </Tag>
+      label="УПД из ЭДО"
+      interactive={documents.length > 0}
+      value={
+        edoNumbers.slice(0, INLINE_NUMBERS).join(', ') +
+        (edoNumbers.length > INLINE_NUMBERS ? ` +${edoNumbers.length - INLINE_NUMBERS}` : '')
+      }
+    />
   );
 
   return (
@@ -239,52 +245,62 @@ export function OperationDocumentsChips({
             open={openGroup === group.kindLabel}
             onOpenChange={(visible) => setOpenGroup(visible ? group.kindLabel : null)}
           >
-            <Tag color="blue" style={{ marginInlineEnd: 0, cursor: 'pointer' }}>
-              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                {group.kindLabel}:
-              </Typography.Text>{' '}
-              <Typography.Text strong style={{ fontSize: 12 }}>
-                {shown}
-                {restCount > 0 ? ` +${restCount}` : ''}
-              </Typography.Text>
-            </Tag>
+            <HeaderChip
+              color="blue"
+              label={group.kindLabel}
+              interactive
+              value={`${shown}${restCount > 0 ? ` +${restCount}` : ''}`}
+            />
           </Popover>
         );
       })}
       {docDate && (
-        <Tag style={{ marginInlineEnd: 0 }}>
-          Дата документа: {docDate.text}
-          {partial(docDate.known, docDate.total)}
-        </Tag>
+        <HeaderChip
+          label="Дата документа"
+          value={dateRangeRu(docDate) + partial(docDate.known, docDate.total)}
+        />
       )}
       {expectedDate && (
-        <Tag style={{ marginInlineEnd: 0 }}>
-          Дата поставки: {expectedDate.text}
-          {partial(expectedDate.known, expectedDate.total)}
-        </Tag>
+        <HeaderChip
+          label="Дата поставки"
+          value={dateRangeRu(expectedDate) + partial(expectedDate.known, expectedDate.total)}
+        />
       )}
       {money && !edoSummary && (
-        <Tag style={{ marginInlineEnd: 0 }}>
-          {documents.length > 1 ? 'Сумма по документам' : 'Сумма'}: {formatMoneyRu(money.total)}
-          {money.known < money.count ? ` · сумма указана у ${money.known} из ${money.count}` : ''}
-        </Tag>
+        <HeaderChip
+          label={documents.length > 1 ? 'Сумма по документам' : 'Сумма'}
+          value={
+            formatMoneyRu(money.total) +
+            (money.known < money.count ? ` · сумма указана у ${money.known} из ${money.count}` : '')
+          }
+        />
       )}
       {money && edoSummary && (
         <Tooltip title={edoHeaderSumHint(edoSummary)}>
-          <Tag style={{ marginInlineEnd: 0 }} color={edoSummary.ambiguous ? 'warning' : undefined}>
-            {edoSummary.ambiguous && <WarningOutlined style={{ marginInlineEnd: 4 }} />}
-            {edoHeaderSumLabel(edoSummary)}: {formatMoneyRu(money.total)}
-            {money.known < money.count ? ` · сумма указана у ${money.known} из ${money.count}` : ''}
-            {shared ? ` · ${shared}` : ''}
-          </Tag>
+          <HeaderChip
+            color={edoSummary.ambiguous ? 'warning' : undefined}
+            label={
+              <>
+                {edoSummary.ambiguous && <WarningOutlined style={{ marginInlineEnd: 4 }} />}
+                {edoHeaderSumLabel(edoSummary)}
+              </>
+            }
+            value={
+              formatMoneyRu(money.total) +
+              (money.known < money.count
+                ? ` · сумма указана у ${money.known} из ${money.count}`
+                : '') +
+              (shared ? ` · ${shared}` : '')
+            }
+          />
         </Tooltip>
       )}
       {mismatch && (
         <Tooltip title={mismatch.hint}>
-          <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+          <HeaderChip color="orange">
             <WarningOutlined style={{ marginInlineEnd: 4 }} />
             {mismatch.text}
-          </Tag>
+          </HeaderChip>
         </Tooltip>
       )}
     </>

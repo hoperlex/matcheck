@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react';
-import { Popover, Tag, Tooltip, Typography } from 'antd';
+import { Popover, Tooltip, Typography } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
+import { HeaderChip } from './HeaderChip';
 
 /**
  * Inline-редактируемый «чип» — визуально как `<Tag>` из read-only
@@ -24,7 +25,8 @@ import { EditOutlined } from '@ant-design/icons';
  * поведение antd `trigger='click'`).
  *
  * Стиль чипа: цвет blue по умолчанию (как «Объект»/«УПД» в ViewModal);
- * если значение пусто (`isEmpty`) — серый с подсказкой-плейсхолдером.
+ * если значение пусто (`isEmpty`) — серый с подсказкой-плейсхолдером. Вид —
+ * общий для шапки (HeaderChip): высота 24px, подпись серым, значение жирным.
  */
 export function InlineEditChip({
   label,
@@ -67,34 +69,20 @@ export function InlineEditChip({
   const display = isEmpty ? placeholder ?? '— не указано —' : value;
 
   const tag = (
-    <Tag
-      color={isEmpty ? undefined : color ?? 'blue'}
-      style={{
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        marginInlineEnd: 0,
-        opacity: disabled ? 0.6 : 1,
-        userSelect: 'none',
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 4,
-      }}
+    <HeaderChip
+      label={label}
+      required={required}
+      value={display}
+      color={isEmpty ? undefined : (color ?? 'blue')}
+      interactive
+      disabled={disabled}
+      suffix={!disabled && <EditOutlined style={{ fontSize: 10, color: '#bfbfbf' }} />}
       onClick={(e) => {
         if (disabled) return;
         e.stopPropagation();
         setOpen(true);
       }}
-    >
-      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-        {label}
-        {required && <span style={{ color: '#ff4d4f' }}>*</span>}:
-      </Typography.Text>{' '}
-      <Typography.Text strong style={{ fontSize: 12 }}>
-        {display}
-      </Typography.Text>
-      {!disabled && (
-        <EditOutlined style={{ fontSize: 10, color: '#bfbfbf', marginLeft: 2 }} />
-      )}
-    </Tag>
+    />
   );
 
   if (disabled) {

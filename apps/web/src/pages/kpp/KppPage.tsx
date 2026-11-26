@@ -15,7 +15,6 @@ import {
   Space,
   Spin,
   Switch,
-  Tag,
   Tooltip,
   Typography,
   Upload,
@@ -83,6 +82,13 @@ import { localCacheEnabled } from '../../lib/localCache';
 import { reportPhotoCaptureError } from '../../services/photoCaptureError';
 import { StickyPageHeader } from '../../shared/ui/StickyPageHeader';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
+import {
+  HEADER_BUTTON_CHIP_STYLE,
+  HeaderAddButton,
+  HeaderChip,
+  HeaderRow,
+  OperationHeader,
+} from '../../shared/ui/HeaderChip';
 import { FlagChip } from '../../shared/ui/FlagChip';
 import { ReviewControls } from '../../shared/ui/ReviewControls';
 import { DispatcherCheckControl } from '../../shared/ui/DispatcherCheckControl';
@@ -118,7 +124,6 @@ import {
   edoCountLabel,
   useFactPanels,
 } from './DeliveryEdoSectionBody';
-import { LinkOutlined } from '@ant-design/icons';
 import { parseDeliveryComment } from '../../shared/utils/parseDeliveryComment';
 import {
   formatMoneyRu,
@@ -2243,10 +2248,12 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
           />
         )}
 
-        {/* Inline-шапка из чипов: визуально как в read-only ViewModal'е,
-            но клик по чипу открывает Popover с редактором (Select/Input).
-            Экономит ~50-80px вертикально по сравнению с grid + label —
-            больше места под Фото и Материалы. */}
+        {/* Inline-шапка из чипов: клик по чипу открывает Popover с редактором
+            (Select/Input). Экономит ~50-80px вертикально по сравнению с
+            grid + label — больше места под Фото и Материалы.
+            Ряды по смыслу (OperationHeader): Приёмка / Документы / ЭДО / Учёт.
+            Не помещается — ряд переносится внутри себя, под свою подпись;
+            на узкой карточке подпись встаёт над плашками. */}
         {(() => {
           const siteLabel = (() => {
             const s = sites.find((x) => x.id === siteId);
@@ -2272,500 +2279,507 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
             return m ? `МОЛ: ${m.fullName}` : null;
           })();
           return (
-            <Space wrap size={[6, 6]} style={{ marginBottom: 8 }}>
-              <InlineEditChip
-                label="Объект"
-                value={siteLabel}
-                required
-                disabled={isInspector || isContractor}
-                width={320}
-              >
-                {(close) => (
-                  <Select<string>
-                    autoFocus
-                    style={{ width: '100%' }}
-                    placeholder="Выберите объект"
-                    value={siteId ?? undefined}
-                    onChange={(v) => {
-                      setSiteId(v);
-                      close();
-                    }}
-                    showSearch
-                    optionFilterProp="label"
-                    loading={sitesQuery.isLoading}
-                    options={sites.map((s) => ({
-                      value: s.id,
-                      label: `${s.code} · ${s.name}`,
-                    }))}
-                    notFoundContent={
-                      <Typography.Text type="secondary">
-                        Объектов нет — заведите в Справочниках
-                      </Typography.Text>
-                    }
-                  />
-                )}
-              </InlineEditChip>
-
-              <InlineEditChip
-                label={loadedDelivery?.recipientsPerDocument ? 'Получатель (общий)' : 'Получатель'}
-                value={recipientLabel}
-                disabled={isContractor || !canEditDelivery || saveRecipient.isPending}
-                width={320}
-                // Режим «сразу»: окно открывается с серверным получателем, а
-                // закрытое без выбора (сменили только «Подрядчик / МОЛ»)
-                // возвращает его — иначе чип показывал бы «не указан», хотя
-                // на сервере получатель есть.
-                onOpenChange={
-                  recipientImmediate
-                    ? (open) => {
-                        if (open) recipientPickedRef.current = false;
-                        if (!recipientPickedRef.current && !saveRecipient.isPending)
-                          syncRecipientFromServer();
-                      }
-                    : undefined
-                }
-              >
-                {(close) => (
-                  <RecipientPicker
-                    kind={recipientKind}
-                    onKindChange={(next) => {
-                      setPendingPurpose(null);
-                      setRecipientKind(next);
-                      if (next === 'counterparty') setRecipientMolId(null);
-                      else setContractorId(null);
-                      if (!recipientImmediate) recipientDirtyRef.current = true;
-                    }}
-                    contractorId={contractorId}
-                    contractorName={contractorName}
-                    recipientMolId={recipientMolId}
-                    canPickContractor={canPickContractor}
-                    mols={responsiblePersons}
-                    molsLoading={responsiblePersonsQuery.isLoading}
-                    onContractorChange={(id, name) => {
-                      setPendingPurpose(null);
-                      if (id && name) setPickedContractor({ id, name });
-                      setContractorId(id);
-                      pickRecipient(id ? { contractorId: id } : { none: true });
-                      close();
-                    }}
-                    onMolChange={(id) => {
-                      setPendingPurpose(null);
-                      setRecipientMolId(id);
-                      pickRecipient(id ? { recipientMolId: id } : { none: true });
-                      close();
-                    }}
-                  />
-                )}
-              </InlineEditChip>
-
-              {/* Документы режима — сканы и УПД из ЭДО без скана (приёмка 22973:
-                  две УПД из Диадока). Включённый режим держит тумблер, даже
-                  если документ остался один, — иначе его нечем выключить. */}
-              {(loadedDelivery.recipientsPerDocument ||
-                (loadedDelivery.recipientDocumentCount ??
-                  loadedDelivery.sourceDocumentIds.length) >= 2) && (
-                <Tooltip
-                  title={
-                    loadedDelivery.recipientsPerDocument &&
-                    ownDocumentPurposeExists &&
-                    !canChoosePurpose
-                      ? 'Для сброса собственных признаков нужно право проверки'
-                      : undefined
-                  }
-                >
-                  <span onClick={(event) => event.stopPropagation()}>
-                    {loadedDelivery.recipientsPerDocument ? (
-                      <Popconfirm
-                        title="Выключить разные получатели?"
-                        description={`У ${ownDocumentSettingsCount} документов свой получатель, признак или договор — сбросить?`}
-                        okText="Сбросить"
-                        cancelText="Отмена"
-                        onConfirm={() => patchRecipientMode.mutate(false)}
-                      >
-                        <Switch
-                          size="small"
-                          // Пока PATCH идёт, тумблер уже в новом положении.
-                          checked={!(patchRecipientMode.isPending && patchRecipientMode.variables === false)}
-                          loading={patchRecipientMode.isPending}
-                          disabled={
-                            !canEditDocumentRecipient ||
-                            isPending ||
-                            patchRecipientMode.isPending ||
-                            (ownDocumentPurposeExists && !canChoosePurpose)
-                          }
-                        />
-                      </Popconfirm>
-                    ) : (
-                      <Switch
-                        size="small"
-                        checked={patchRecipientMode.isPending && patchRecipientMode.variables === true}
-                        loading={patchRecipientMode.isPending}
-                        disabled={
-                          !canEditDocumentRecipient || isPending || patchRecipientMode.isPending
-                        }
-                        onChange={() => patchRecipientMode.mutate(true)}
-                      />
-                    )}
-                    <Typography.Text style={{ marginInlineStart: 5 }}>
-                      Разные получатели по документам
-                    </Typography.Text>
-                  </span>
-                </Tooltip>
-              )}
-
-              {/* Подсказка получателя по сторонам документов (приёмка 21514).
-                  Только у существующей приёмки с документами и только пока
-                  получатель пуст: подставляет человек, сохраняет обычной
-                  кнопкой — тем же путём, что ручной выбор в чипе выше. */}
-              {loadedDelivery &&
-                deliveryId &&
-                !isNew &&
-                canPickContractor &&
-                !isContractor &&
-                recipientKind === 'counterparty' &&
-                !contractorId &&
-                !recipientMolId &&
-                (loadedDelivery.sourceDocumentIds?.length ?? 0) > 0 && (
-                  <RecipientSuggestionHint
-                    deliveryId={deliveryId}
-                    sourceDocumentIds={loadedDelivery.sourceDocumentIds}
-                    onApply={(cp) => {
-                      setPendingPurpose(null);
-                      setPickedContractor({ id: cp.id, name: cp.name });
-                      setContractorId(cp.id);
-                      // Тот же путь, что ручной выбор в чипе: в режиме «сразу»
-                      // подставленный подрядчик пишется PATCH-ем, а не ждёт
-                      // «Сохранить» (buildPatch в этом режиме получателя не шлёт).
-                      pickRecipient({ contractorId: cp.id });
-                    }}
-                  />
-                )}
-
-              {/* Чип «Поставщик»: симметрично с отгрузкой. Если у приёмки
-                  привязана УПД (sourceDocumentIds.length > 0), имя
-                  поставщика приходит из УПД (приоритет УПД, см. бэк endpoint
-                  /supplier-from-directory), и поправить его можно только в
-                  самом основном документе — с правом карточки документа.
-                  Иначе менеджер выбирает из Справочника → Поставщики. */}
-              {/* У нового ручного вноса поставщика нет: чип сохраняет отдельным
-                  запросом, а записи на сервере ещё нет (404). После создания —
-                  в карточке как обычно. */}
-              {loadedDelivery && deliveryId && !isManualNew && (
-                <SupplierChip
-                  entity="delivery"
-                  entityId={deliveryId}
-                  hasUpd={(loadedDelivery.sourceDocumentIds?.length ?? 0) > 0}
-                  displayName={supplierDisplayName}
-                  invalidateQueryKey={['deliveries', deliveryId]}
-                  disabled={!canPickSupplier}
-                  updEdit={
-                    updSupplierEdit ? { ...updSupplierEdit, onSaved: setSelectedUpd } : undefined
-                  }
-                />
-              )}
-
-              {isManualEntry && (
-                <Tag color="cyan" style={{ marginInlineEnd: 0 }}>
-                  Ручной внос
-                </Tag>
-              )}
-
-              {!isManualNew && (
+            <OperationHeader>
+              <HeaderRow label="Приёмка">
                 <InlineEditChip
-                  label="Госномер"
-                  value={plate || null}
-                  placeholder={isManualEntry ? '— без машины —' : '— не указан —'}
-                  width={200}
+                  label="Объект"
+                  value={siteLabel}
+                  required
+                  disabled={isInspector || isContractor}
+                  width={320}
                 >
                   {(close) => (
-                    <Input
+                    <Select<string>
                       autoFocus
-                      size="small"
-                      placeholder="А123ВВ77"
-                      value={plate}
-                      onChange={(e) => setPlate(e.target.value.toUpperCase())}
-                      onPressEnter={close}
-                      onBlur={close}
-                      autoCapitalize="characters"
+                      style={{ width: '100%' }}
+                      placeholder="Выберите объект"
+                      value={siteId ?? undefined}
+                      onChange={(v) => {
+                        setSiteId(v);
+                        close();
+                      }}
+                      showSearch
+                      optionFilterProp="label"
+                      loading={sitesQuery.isLoading}
+                      options={sites.map((s) => ({
+                        value: s.id,
+                        label: `${s.code} · ${s.name}`,
+                      }))}
+                      notFoundContent={
+                        <Typography.Text type="secondary">
+                          Объектов нет — заведите в Справочниках
+                        </Typography.Text>
+                      }
                     />
                   )}
                 </InlineEditChip>
-              )}
 
-              {/* УПД / Перемещение — read-only чип: значение приходит из УПД
-                  (либо при создании, либо после привязки), inline-редактирования
-                  тут нет. Tag-стиль как у read-only ViewModal. */}
-              {loadedDelivery?.sourceShipmentId ? (
-                <>
-                  <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
-                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                      Перемещение:
-                    </Typography.Text>{' '}
-                    <Typography.Text strong style={{ fontSize: 12 }}>
-                      с объекта {loadedDelivery.sourceShipmentSiteCode ?? '—'}
-                    </Typography.Text>
-                  </Tag>
-                  <Tag style={{ marginInlineEnd: 0 }}>
-                    Отгружено: {formatMolDate(loadedDelivery.sourceShipmentShippedAt)}
-                  </Tag>
-                  <Tag style={{ marginInlineEnd: 0 }}>
-                    Принято: {formatMolDate(loadedDelivery.arrivedAt)}
-                  </Tag>
-                </>
-              ) : linkedDocuments.length > 0 || loadedDelivery?.edoSummary ? (
-                <>
-                  {/* Все связанные документы поставки: номера через запятую по
-                      видам, даты и сумма — по всем сразу. Полный список с
-                      кнопкой «Отвязать» открывается кликом по чипу. С УПД из
-                      ЭДО номер, дата и сумма — по ЭДО (edoSummary). */}
-                  <OperationDocumentsChips
-                    documents={linkedDocuments}
-                    edoSummary={loadedDelivery?.edoSummary}
-                    onUnlink={
-                      canUnlinkUpd
-                        ? (doc, { deleteItems }) => unlinkUpd.mutate({ doc, deleteItems })
-                        : undefined
-                    }
-                    itemCountByDocumentId={itemCountByDocumentId}
-                    onOpenOriginal={
-                      embedded
-                        ? (doc) => {
-                            setOriginalDoc(doc);
-                            setOriginalOpen(true);
-                          }
-                        : undefined
-                    }
-                    unlinkPending={unlinkUpd.isPending}
-                  />
-                </>
-              ) : offlineDocumentCount > 0 ? (
-                // Офлайн-снимок от /sync сводку документов не содержит: честно
-                // говорим, сколько их, вместо «— без УПД —».
-                <Tag style={{ marginInlineEnd: 0 }}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    Документов: {offlineDocumentCount}
-                  </Typography.Text>
-                </Tag>
-              ) : (
-                <Tag style={{ marginInlineEnd: 0 }}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    — без УПД —
-                  </Typography.Text>
-                </Tag>
-              )}
-              {/* «Документ» — добавить ещё одну УПД или накладную. Раньше кнопка
-                  исчезала, как только был привязан хоть один документ, и добрать
-                  второй документ поставки из карточки было нельзя. */}
-              {canLinkUpd && !isNew && !loadedDelivery?.sourceShipmentId && (
-                <>
-                  <Button
-                    size="small"
-                    type="dashed"
-                    icon={<LinkOutlined />}
-                    onClick={() => {
-                      setLinkUpdError(null);
-                      setLinkUpdOpen(true);
-                    }}
-                  >
-                    Документ
-                  </Button>
-                  {!isPending && (
-                    <Button size="small" type="dashed" onClick={() => openLinkEdo(null)}>
-                      + УПД из ЭДО
-                    </Button>
-                  )}
-                </>
-              )}
-              {canLinkUpd && (
-                <LinkedEdoChips
-                  deliveryId={loadedDelivery?.id ?? null}
-                  documents={headerEdoMatches}
-                  photos={loadedDelivery?.photos ?? []}
-                  unlinkDisabled={unlinkEdo.isPending || isPending}
-                  onUnlink={(document) => unlinkEdo.mutate(document)}
-                  onOpenOriginal={(document) => void openEdoFile(document)}
-                  onShare={shareEdoTo}
-                />
-              )}
-              {/* Заказы поставщикам из EstiMat. Чип — привязанные заказы (цвет по
-                  худшему состоянию визы), «+ Заказ» — окно подбора. Кнопки нет,
-                  пока синхронизация не включена: пустое окно ничего не даст. */}
-              <SupplierOrderChip
-                orders={supplierOrders}
-                onUnlink={
-                  canLinkSupplierOrder && !isPending
-                    ? (order) => unlinkSupplierOrder.mutate(order)
-                    : undefined
-                }
-                unlinkPending={unlinkSupplierOrder.isPending}
-              />
-              {canLinkSupplierOrder &&
-                !isNew &&
-                !isPending &&
-                !loadedDelivery?.sourceShipmentId &&
-                supplierOrdersQuery.data?.sync.enabled && (
-                  <Button size="small" type="dashed" onClick={() => setLinkOrderOpen(true)}>
-                    + Заказ
-                  </Button>
-                )}
-              {/* Договор 1С. Чип — выбранный договор (оранжевый, если что-то не
-                  сходится), «+ Договор» — окно подбора. Кнопки нет, пока
-                  справочник пуст (импорт не делали): пустое окно ничего не даст. */}
-              {canViewContract && (
-                <ContractChip
-                  contract={contract}
-                  label={loadedDelivery?.recipientsPerDocument ? 'Договор (общий):' : 'Договор:'}
-                  onUnlink={
-                    canLinkContract && !isPending
-                      ? (expected) => unlinkContract.mutate({ expected, documentId: null })
+                <InlineEditChip
+                  label={
+                    loadedDelivery?.recipientsPerDocument ? 'Получатель (общий)' : 'Получатель'
+                  }
+                  value={recipientLabel}
+                  disabled={isContractor || !canEditDelivery || saveRecipient.isPending}
+                  width={320}
+                  // Режим «сразу»: окно открывается с серверным получателем, а
+                  // закрытое без выбора (сменили только «Подрядчик / МОЛ»)
+                  // возвращает его — иначе чип показывал бы «не указан», хотя
+                  // на сервере получатель есть.
+                  onOpenChange={
+                    recipientImmediate
+                      ? (open) => {
+                          if (open) recipientPickedRef.current = false;
+                          if (!recipientPickedRef.current && !saveRecipient.isPending)
+                            syncRecipientFromServer();
+                        }
                       : undefined
                   }
-                  onReplace={
-                    canLinkContract && !isPending && !loadedDelivery?.sourceShipmentId
-                      ? () => setContractTarget({ documentId: null, label: null })
-                      : undefined
-                  }
-                  unlinkPending={unlinkContract.isPending}
-                />
-              )}
-              {canPickContract && !contract && (
-                <Button
-                  size="small"
-                  type="dashed"
-                  onClick={() => setContractTarget({ documentId: null, label: null })}
                 >
-                  {loadedDelivery?.recipientsPerDocument ? '+ Договор (общий)' : '+ Договор'}
-                </Button>
-              )}
-              {/* Транзит — admin/manager могут поставить/снять прямо
-                  с портала (PATCH /deliveries/:id/flags). Inspector_kpp
-                  видит только цветной чип при true (как раньше), править
-                  не может — для него поле редактируется чекбоксом «Транзит»
-                  на 1 этапе в мобиле. См. миграцию 0051 + новый FlagChip. */}
-              {loadedDelivery && !isManualNew && (
-                <FlagChip
-                  label="Транзит"
-                  emoji="🚚"
-                  color="orange"
-                  value={loadedDelivery.inTransit}
-                  disabled={!canEditFlags || patchFlags.isPending}
-                  loading={patchFlags.isPending}
-                  onChange={(next) => patchFlags.mutate({ inTransit: next })}
-                />
-              )}
-              {/* ОС — флаг «основные средства», рядом с Транзитом.
-                  Источник на 1 этапе мобилы — чекбокс «ОС». См. миграцию
-                  0065. Менеджер правит ошибочные значения с портала. */}
-              {loadedDelivery && !isManualNew && (
-                <FlagChip
-                  label="ОС"
-                  emoji="📦"
-                  color="purple"
-                  value={loadedDelivery.isAssets}
-                  disabled={!canEditFlags || patchFlags.isPending}
-                  loading={patchFlags.isPending}
-                  onChange={(next) => patchFlags.mutate({ isAssets: next })}
-                />
-              )}
-              {canChoosePurpose &&
-                (() => {
-                  // При несохранённом получателе выбор остаётся в форме и уйдёт
-                  // вместе с ним в одном upsert. Для сохранённого получателя
-                  // признак по-прежнему меняется точечным PATCH.
-                  const savedKind = deliveryRecipientKind(loadedDelivery);
-                  // В режиме «сразу» получатель формы — серверный: признак
-                  // меняется точечным PATCH, пока запрос получателя не идёт.
-                  const formRecipient = recipientImmediate
-                    ? {
-                        contractorId: loadedDelivery.contractorId,
-                        recipientMolId: loadedDelivery.recipientMolId,
-                      }
-                    : {
-                        contractorId: recipientKind === 'counterparty' ? contractorId : null,
-                        recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
-                      };
-                  const recipientDirty =
-                    (formRecipient.contractorId ?? null) !== loadedDelivery.contractorId ||
-                    (formRecipient.recipientMolId ?? null) !== loadedDelivery.recipientMolId;
-                  const purposeLocked =
-                    isPending || patchPurpose.isPending || saveRecipient.isPending;
-                  const shown =
-                    pendingPurpose ??
-                    (recipientDirty
-                      ? reconcileDeliveryPurpose(
-                          savedKind,
-                          deliveryRecipientKind(formRecipient),
-                          loadedDelivery.purpose ?? null,
-                        )
-                      : (loadedDelivery.purpose ?? null));
-                  const allowed = allowedDeliveryPurposes(deliveryRecipientKind(formRecipient));
-                  // Справочник «Объекты и вид»: подсказка относится к СОХРАНЁННОЙ паре
-                  // подрядчик × объект — пока получатель или объект формы не
-                  // сохранены, её не показываем (сервер пересчитает при записи).
-                  const siteDirty = siteId !== null && siteId !== loadedDelivery.siteId;
-                  const hint = recipientDirty || siteDirty ? null : loadedDelivery.purposeHint;
-                  const dirState = purposeDirectoryState(
-                    hint,
-                    shown,
-                    pendingPurpose === null && loadedDelivery.purposeFromDirectory === true,
-                  );
-                  const dirColor = purposeButtonColor(hint, dirState);
-                  const button = (
-                    <Button
-                      size="small"
-                      loading={patchPurpose.isPending}
-                      disabled={purposeLocked}
-                      {...(dirColor && { color: dirColor, variant: 'outlined' as const })}
-                    >
-                      Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:{' '}
-                      {shown ? DELIVERY_PURPOSE_LABELS[shown] : '—'} <DownOutlined />
-                    </Button>
-                  );
-                  return (
-                    <>
-                      <Dropdown
-                        menu={{
-                          items: DELIVERY_PURPOSE_OPTIONS.filter((o) =>
-                            allowed.includes(o.key),
-                          ).map((o) => ({
-                            key: o.key,
-                            label: purposeMenuLabel(o.key, o.label, hint),
-                          })),
-                          selectedKeys: shown ? [shown] : [],
-                          onClick: ({ key }) => {
-                            if (isNew || recipientDirty || pendingPurpose !== null) {
-                              setPendingPurpose(key as DeliveryPurpose);
-                            } else {
-                              patchPurpose.mutate(key as DeliveryPurpose);
-                            }
-                          },
-                        }}
-                        disabled={purposeLocked}
-                        trigger={['click']}
-                      >
-                        {button}
-                      </Dropdown>
-                      <PurposeDirectoryMark hint={hint} state={dirState} />
-                    </>
-                  );
-                })()}
-              {!canChoosePurpose && loadedDelivery.purpose && (
-                <Tag style={{ marginInlineEnd: 0 }}>
-                  Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:{' '}
-                  {DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose]}
-                </Tag>
-              )}
-              {!canChoosePurpose && loadedDelivery.purpose && (
-                <PurposeDirectoryMark
-                  hint={loadedDelivery.purposeHint}
-                  state={purposeDirectoryState(
-                    loadedDelivery.purposeHint,
-                    loadedDelivery.purpose,
-                    loadedDelivery.purposeFromDirectory === true,
+                  {(close) => (
+                    <RecipientPicker
+                      kind={recipientKind}
+                      onKindChange={(next) => {
+                        setPendingPurpose(null);
+                        setRecipientKind(next);
+                        if (next === 'counterparty') setRecipientMolId(null);
+                        else setContractorId(null);
+                        if (!recipientImmediate) recipientDirtyRef.current = true;
+                      }}
+                      contractorId={contractorId}
+                      contractorName={contractorName}
+                      recipientMolId={recipientMolId}
+                      canPickContractor={canPickContractor}
+                      mols={responsiblePersons}
+                      molsLoading={responsiblePersonsQuery.isLoading}
+                      onContractorChange={(id, name) => {
+                        setPendingPurpose(null);
+                        if (id && name) setPickedContractor({ id, name });
+                        setContractorId(id);
+                        pickRecipient(id ? { contractorId: id } : { none: true });
+                        close();
+                      }}
+                      onMolChange={(id) => {
+                        setPendingPurpose(null);
+                        setRecipientMolId(id);
+                        pickRecipient(id ? { recipientMolId: id } : { none: true });
+                        close();
+                      }}
+                    />
                   )}
-                />
+                </InlineEditChip>
+
+                {/* Документы режима — сканы и УПД из ЭДО без скана (приёмка 22973:
+                    две УПД из Диадока). Включённый режим держит тумблер, даже
+                    если документ остался один, — иначе его нечем выключить. */}
+                {(loadedDelivery.recipientsPerDocument ||
+                  (loadedDelivery.recipientDocumentCount ??
+                    loadedDelivery.sourceDocumentIds.length) >= 2) && (
+                  <Tooltip
+                    title={
+                      loadedDelivery.recipientsPerDocument &&
+                      ownDocumentPurposeExists &&
+                      !canChoosePurpose
+                        ? 'Для сброса собственных признаков нужно право проверки'
+                        : undefined
+                    }
+                  >
+                    {/* Тумблер в плашке — того же вида, что соседние. */}
+                    <HeaderChip onClick={(event) => event.stopPropagation()}>
+                      {loadedDelivery.recipientsPerDocument ? (
+                        <Popconfirm
+                          title="Выключить разные получатели?"
+                          description={`У ${ownDocumentSettingsCount} документов свой получатель, признак или договор — сбросить?`}
+                          okText="Сбросить"
+                          cancelText="Отмена"
+                          onConfirm={() => patchRecipientMode.mutate(false)}
+                        >
+                          <Switch
+                            size="small"
+                            // Пока PATCH идёт, тумблер уже в новом положении.
+                            checked={
+                              !(
+                                patchRecipientMode.isPending &&
+                                patchRecipientMode.variables === false
+                              )
+                            }
+                            loading={patchRecipientMode.isPending}
+                            disabled={
+                              !canEditDocumentRecipient ||
+                              isPending ||
+                              patchRecipientMode.isPending ||
+                              (ownDocumentPurposeExists && !canChoosePurpose)
+                            }
+                          />
+                        </Popconfirm>
+                      ) : (
+                        <Switch
+                          size="small"
+                          checked={
+                            patchRecipientMode.isPending && patchRecipientMode.variables === true
+                          }
+                          loading={patchRecipientMode.isPending}
+                          disabled={
+                            !canEditDocumentRecipient || isPending || patchRecipientMode.isPending
+                          }
+                          onChange={() => patchRecipientMode.mutate(true)}
+                        />
+                      )}
+                      <span style={{ marginInlineStart: 6 }}>Разные получатели по документам</span>
+                    </HeaderChip>
+                  </Tooltip>
+                )}
+
+                {/* Подсказка получателя по сторонам документов (приёмка 21514).
+                    Только у существующей приёмки с документами и только пока
+                    получатель пуст: подставляет человек, сохраняет обычной
+                    кнопкой — тем же путём, что ручной выбор в чипе выше. */}
+                {loadedDelivery &&
+                  deliveryId &&
+                  !isNew &&
+                  canPickContractor &&
+                  !isContractor &&
+                  recipientKind === 'counterparty' &&
+                  !contractorId &&
+                  !recipientMolId &&
+                  (loadedDelivery.sourceDocumentIds?.length ?? 0) > 0 && (
+                    <RecipientSuggestionHint
+                      deliveryId={deliveryId}
+                      sourceDocumentIds={loadedDelivery.sourceDocumentIds}
+                      onApply={(cp) => {
+                        setPendingPurpose(null);
+                        setPickedContractor({ id: cp.id, name: cp.name });
+                        setContractorId(cp.id);
+                        // Тот же путь, что ручной выбор в чипе: в режиме «сразу»
+                        // подставленный подрядчик пишется PATCH-ем, а не ждёт
+                        // «Сохранить» (buildPatch в этом режиме получателя не шлёт).
+                        pickRecipient({ contractorId: cp.id });
+                      }}
+                    />
+                  )}
+
+                {/* Чип «Поставщик»: симметрично с отгрузкой. Если у приёмки
+                    привязана УПД (sourceDocumentIds.length > 0), имя
+                    поставщика приходит из УПД (приоритет УПД, см. бэк endpoint
+                    /supplier-from-directory), и поправить его можно только в
+                    самом основном документе — с правом карточки документа.
+                    Иначе менеджер выбирает из Справочника → Поставщики. */}
+                {/* У нового ручного вноса поставщика нет: чип сохраняет отдельным
+                    запросом, а записи на сервере ещё нет (404). После создания —
+                    в карточке как обычно. */}
+                {loadedDelivery && deliveryId && !isManualNew && (
+                  <SupplierChip
+                    entity="delivery"
+                    entityId={deliveryId}
+                    hasUpd={(loadedDelivery.sourceDocumentIds?.length ?? 0) > 0}
+                    displayName={supplierDisplayName}
+                    invalidateQueryKey={['deliveries', deliveryId]}
+                    disabled={!canPickSupplier}
+                    updEdit={
+                      updSupplierEdit ? { ...updSupplierEdit, onSaved: setSelectedUpd } : undefined
+                    }
+                  />
+                )}
+
+                {isManualEntry && <HeaderChip color="cyan">Ручной внос</HeaderChip>}
+
+                {!isManualNew && (
+                  <InlineEditChip
+                    label="Госномер"
+                    value={plate || null}
+                    placeholder={isManualEntry ? '— без машины —' : '— не указан —'}
+                    width={200}
+                  >
+                    {(close) => (
+                      <Input
+                        autoFocus
+                        size="small"
+                        placeholder="А123ВВ77"
+                        value={plate}
+                        onChange={(e) => setPlate(e.target.value.toUpperCase())}
+                        onPressEnter={close}
+                        onBlur={close}
+                        autoCapitalize="characters"
+                      />
+                    )}
+                  </InlineEditChip>
+                )}
+              </HeaderRow>
+              <HeaderRow label="Документы">
+                {/* УПД / Перемещение — read-only чип: значение приходит из УПД
+                    (либо при создании, либо после привязки), inline-редактирования
+                    тут нет. Tag-стиль как у read-only ViewModal. */}
+                {loadedDelivery?.sourceShipmentId ? (
+                  <>
+                    <HeaderChip
+                      color="geekblue"
+                      label="Перемещение"
+                      value={`с объекта ${loadedDelivery.sourceShipmentSiteCode ?? '—'}`}
+                    />
+                    {/* Время событий — с часами, как было (formatMolDate). */}
+                    <HeaderChip
+                      label="Отгружено"
+                      value={formatMolDate(loadedDelivery.sourceShipmentShippedAt)}
+                    />
+                    <HeaderChip label="Принято" value={formatMolDate(loadedDelivery.arrivedAt)} />
+                  </>
+                ) : linkedDocuments.length > 0 || loadedDelivery?.edoSummary ? (
+                  <>
+                    {/* Все связанные документы поставки: номера через запятую по
+                        видам, даты и сумма — по всем сразу. Полный список с
+                        кнопкой «Отвязать» открывается кликом по чипу. С УПД из
+                        ЭДО номер, дата и сумма — по ЭДО (edoSummary). */}
+                    <OperationDocumentsChips
+                      documents={linkedDocuments}
+                      edoSummary={loadedDelivery?.edoSummary}
+                      onUnlink={
+                        canUnlinkUpd
+                          ? (doc, { deleteItems }) => unlinkUpd.mutate({ doc, deleteItems })
+                          : undefined
+                      }
+                      itemCountByDocumentId={itemCountByDocumentId}
+                      onOpenOriginal={
+                        embedded
+                          ? (doc) => {
+                              setOriginalDoc(doc);
+                              setOriginalOpen(true);
+                            }
+                          : undefined
+                      }
+                      unlinkPending={unlinkUpd.isPending}
+                    />
+                  </>
+                ) : offlineDocumentCount > 0 ? (
+                  // Офлайн-снимок от /sync сводку документов не содержит: честно
+                  // говорим, сколько их, вместо «— без УПД —».
+                  <HeaderChip label="Документов" value={offlineDocumentCount} strong={false} />
+                ) : (
+                  <HeaderChip>— без УПД —</HeaderChip>
+                )}
+                {/* «Документ» — добавить ещё одну УПД или накладную. Раньше кнопка
+                    исчезала, как только был привязан хоть один документ, и добрать
+                    второй документ поставки из карточки было нельзя. */}
+                {canLinkUpd && !isNew && !loadedDelivery?.sourceShipmentId && (
+                  <>
+                    <HeaderAddButton
+                      onClick={() => {
+                        setLinkUpdError(null);
+                        setLinkUpdOpen(true);
+                      }}
+                    >
+                      + Документ
+                    </HeaderAddButton>
+                    {!isPending && (
+                      <HeaderAddButton onClick={() => openLinkEdo(null)}>
+                        + УПД из ЭДО
+                      </HeaderAddButton>
+                    )}
+                  </>
+                )}
+              </HeaderRow>
+              {canLinkUpd && headerEdoMatches.length > 0 && (
+                <HeaderRow label="ЭДО">
+                  <LinkedEdoChips
+                    deliveryId={loadedDelivery?.id ?? null}
+                    documents={headerEdoMatches}
+                    photos={loadedDelivery?.photos ?? []}
+                    unlinkDisabled={unlinkEdo.isPending || isPending}
+                    onUnlink={(document) => unlinkEdo.mutate(document)}
+                    onOpenOriginal={(document) => void openEdoFile(document)}
+                    onShare={shareEdoTo}
+                  />
+                </HeaderRow>
               )}
-            </Space>
+              <HeaderRow label="Учёт">
+                {/* Договор 1С. Чип — выбранный договор (оранжевый, если что-то не
+                    сходится), «+ Договор» — окно подбора. Кнопки нет, пока
+                    справочник пуст (импорт не делали): пустое окно ничего не даст. */}
+                {canViewContract && (
+                  <ContractChip
+                    contract={contract}
+                    label={loadedDelivery?.recipientsPerDocument ? 'Договор (общий)' : 'Договор'}
+                    onUnlink={
+                      canLinkContract && !isPending
+                        ? (expected) => unlinkContract.mutate({ expected, documentId: null })
+                        : undefined
+                    }
+                    onReplace={
+                      canLinkContract && !isPending && !loadedDelivery?.sourceShipmentId
+                        ? () => setContractTarget({ documentId: null, label: null })
+                        : undefined
+                    }
+                    unlinkPending={unlinkContract.isPending}
+                  />
+                )}
+                {canPickContract && !contract && (
+                  <HeaderAddButton
+                    onClick={() => setContractTarget({ documentId: null, label: null })}
+                  >
+                    {loadedDelivery?.recipientsPerDocument ? '+ Договор (общий)' : '+ Договор'}
+                  </HeaderAddButton>
+                )}
+                {canChoosePurpose &&
+                  (() => {
+                    // При несохранённом получателе выбор остаётся в форме и уйдёт
+                    // вместе с ним в одном upsert. Для сохранённого получателя
+                    // признак по-прежнему меняется точечным PATCH.
+                    const savedKind = deliveryRecipientKind(loadedDelivery);
+                    // В режиме «сразу» получатель формы — серверный: признак
+                    // меняется точечным PATCH, пока запрос получателя не идёт.
+                    const formRecipient = recipientImmediate
+                      ? {
+                          contractorId: loadedDelivery.contractorId,
+                          recipientMolId: loadedDelivery.recipientMolId,
+                        }
+                      : {
+                          contractorId: recipientKind === 'counterparty' ? contractorId : null,
+                          recipientMolId: recipientKind === 'mol' ? recipientMolId : null,
+                        };
+                    const recipientDirty =
+                      (formRecipient.contractorId ?? null) !== loadedDelivery.contractorId ||
+                      (formRecipient.recipientMolId ?? null) !== loadedDelivery.recipientMolId;
+                    const purposeLocked =
+                      isPending || patchPurpose.isPending || saveRecipient.isPending;
+                    const shown =
+                      pendingPurpose ??
+                      (recipientDirty
+                        ? reconcileDeliveryPurpose(
+                            savedKind,
+                            deliveryRecipientKind(formRecipient),
+                            loadedDelivery.purpose ?? null,
+                          )
+                        : (loadedDelivery.purpose ?? null));
+                    const allowed = allowedDeliveryPurposes(deliveryRecipientKind(formRecipient));
+                    // Справочник «Объекты и вид»: подсказка относится к СОХРАНЁННОЙ паре
+                    // подрядчик × объект — пока получатель или объект формы не
+                    // сохранены, её не показываем (сервер пересчитает при записи).
+                    const siteDirty = siteId !== null && siteId !== loadedDelivery.siteId;
+                    const hint = recipientDirty || siteDirty ? null : loadedDelivery.purposeHint;
+                    const dirState = purposeDirectoryState(
+                      hint,
+                      shown,
+                      pendingPurpose === null && loadedDelivery.purposeFromDirectory === true,
+                    );
+                    const dirColor = purposeButtonColor(hint, dirState);
+                    const button = (
+                      <Button
+                        size="small"
+                        className="mc-chip"
+                        style={HEADER_BUTTON_CHIP_STYLE}
+                        loading={patchPurpose.isPending}
+                        disabled={purposeLocked}
+                        {...(dirColor && { color: dirColor, variant: 'outlined' as const })}
+                      >
+                        {/* Вид плашки: подпись серым, значение жирным. Остаётся
+                            кнопкой — у неё состояние disabled и загрузка. Один
+                            span, иначе antd разносит части на свой gap 8px. */}
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          <span style={{ fontSize: 11, opacity: 0.65 }}>
+                            Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:
+                          </span>{' '}
+                          <strong style={{ fontWeight: 600 }}>
+                            {shown ? DELIVERY_PURPOSE_LABELS[shown] : '—'}
+                          </strong>
+                          <DownOutlined style={{ fontSize: 10 }} />
+                        </span>
+                      </Button>
+                    );
+                    return (
+                      <>
+                        <Dropdown
+                          menu={{
+                            items: DELIVERY_PURPOSE_OPTIONS.filter((o) =>
+                              allowed.includes(o.key),
+                            ).map((o) => ({
+                              key: o.key,
+                              label: purposeMenuLabel(o.key, o.label, hint),
+                            })),
+                            selectedKeys: shown ? [shown] : [],
+                            onClick: ({ key }) => {
+                              if (isNew || recipientDirty || pendingPurpose !== null) {
+                                setPendingPurpose(key as DeliveryPurpose);
+                              } else {
+                                patchPurpose.mutate(key as DeliveryPurpose);
+                              }
+                            },
+                          }}
+                          disabled={purposeLocked}
+                          trigger={['click']}
+                        >
+                          {button}
+                        </Dropdown>
+                        <PurposeDirectoryMark hint={hint} state={dirState} />
+                      </>
+                    );
+                  })()}
+                {!canChoosePurpose && loadedDelivery.purpose && (
+                  <HeaderChip
+                    label={`Признак${loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}`}
+                    value={DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose]}
+                  />
+                )}
+                {!canChoosePurpose && loadedDelivery.purpose && (
+                  <PurposeDirectoryMark
+                    hint={loadedDelivery.purposeHint}
+                    state={purposeDirectoryState(
+                      loadedDelivery.purposeHint,
+                      loadedDelivery.purpose,
+                      loadedDelivery.purposeFromDirectory === true,
+                    )}
+                  />
+                )}
+                {/* Транзит — admin/manager могут поставить/снять прямо
+                    с портала (PATCH /deliveries/:id/flags). Inspector_kpp
+                    видит только цветной чип при true (как раньше), править
+                    не может — для него поле редактируется чекбоксом «Транзит»
+                    на 1 этапе в мобиле. См. миграцию 0051 + новый FlagChip. */}
+                {loadedDelivery && !isManualNew && (
+                  <FlagChip
+                    label="Транзит"
+                    emoji="🚚"
+                    color="orange"
+                    value={loadedDelivery.inTransit}
+                    disabled={!canEditFlags || patchFlags.isPending}
+                    loading={patchFlags.isPending}
+                    onChange={(next) => patchFlags.mutate({ inTransit: next })}
+                  />
+                )}
+                {/* ОС — флаг «основные средства», рядом с Транзитом.
+                    Источник на 1 этапе мобилы — чекбокс «ОС». См. миграцию
+                    0065. Менеджер правит ошибочные значения с портала. */}
+                {loadedDelivery && !isManualNew && (
+                  <FlagChip
+                    label="ОС"
+                    emoji="📦"
+                    color="purple"
+                    value={loadedDelivery.isAssets}
+                    disabled={!canEditFlags || patchFlags.isPending}
+                    loading={patchFlags.isPending}
+                    onChange={(next) => patchFlags.mutate({ isAssets: next })}
+                  />
+                )}
+                {/* Заказы поставщикам из EstiMat. Чип — привязанные заказы (цвет по
+                    худшему состоянию визы), «+ Заказ» — окно подбора. Кнопки нет,
+                    пока синхронизация не включена: пустое окно ничего не даст. */}
+                <SupplierOrderChip
+                  orders={supplierOrders}
+                  onUnlink={
+                    canLinkSupplierOrder && !isPending
+                      ? (order) => unlinkSupplierOrder.mutate(order)
+                      : undefined
+                  }
+                  unlinkPending={unlinkSupplierOrder.isPending}
+                />
+                {canLinkSupplierOrder &&
+                  !isNew &&
+                  !isPending &&
+                  !loadedDelivery?.sourceShipmentId &&
+                  supplierOrdersQuery.data?.sync.enabled && (
+                    <HeaderAddButton onClick={() => setLinkOrderOpen(true)}>
+                      + Заказ
+                    </HeaderAddButton>
+                  )}
+              </HeaderRow>
+            </OperationHeader>
           );
         })()}
 
@@ -3117,9 +3131,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   />
                 )}
                 {canPick && (
-                  <Button
-                    size="small"
-                    type="dashed"
+                  <HeaderAddButton
                     onClick={() =>
                       openLinkEdo({
                         id: doc.id,
@@ -3128,7 +3140,7 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                     }
                   >
                     + ЭДО
-                  </Button>
+                  </HeaderAddButton>
                 )}
               </>
             );

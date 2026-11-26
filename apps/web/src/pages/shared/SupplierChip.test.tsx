@@ -13,6 +13,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactElement } from 'react';
+import { chipText } from '../../test/chipText';
 
 const DOC = '11111111-1111-4111-8111-111111111111';
 const DELIVERY = '22222222-2222-4222-8222-222222222222';
@@ -149,7 +150,7 @@ describe('чип «Поставщик» при привязанном УПД', (
       ),
     );
 
-    fireEvent.click(screen.getByText('Поставщик: ООО «Ошибочный»'));
+    fireEvent.click(screen.getByText(chipText('Поставщик: ООО «Ошибочный»')));
     expect(screen.queryByRole('combobox')).toBeNull();
     expect(get).not.toHaveBeenCalled();
   });
@@ -181,7 +182,7 @@ describe('чип «Поставщик» при привязанном УПД', (
     fireEvent.click(screen.getByText('ООО «Ошибочный»'));
     expect(
       await screen.findByText(
-        'Поставщик в УПД №240627 от 2026-10-13. Меняется в самом документе — во всех приёмках, к которым он привязан.',
+        'Поставщик в УПД №240627 от 13.10.2026. Меняется в самом документе — во всех приёмках, к которым он привязан.',
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/Меняется только этот/)).toBeNull();

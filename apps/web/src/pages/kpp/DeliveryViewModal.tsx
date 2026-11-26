@@ -7,6 +7,7 @@ import { PhotoViewedCounter } from './PhotoViewedCounter';
 import { formatDateRu, formatMoneyRu } from '../../shared/utils/formatRu';
 import { formatDecimal } from '../../shared/utils/formatDecimal';
 import { PendingDeletionTag } from '../../shared/ui/PendingDeletionTag';
+import { HeaderChip, HeaderRow, OperationHeader } from '../../shared/ui/HeaderChip';
 import { ClampText } from '../../shared/ui/ResponsiveTable';
 import { useColumnTools, type ToolColumn } from '../../shared/ui/columnTools';
 import { ReviewBadge, ReviewControls } from '../../shared/ui/ReviewControls';
@@ -42,6 +43,9 @@ export type DeliveryViewData = {
  * Read-only модалка просмотра приёмки (кнопка 👁 в строке). Раньше была
  * Drawer'ом — переехала на Modal для визуального единообразия с
  * edit-режимом (этап 2.А): оба окна выглядят одинаково.
+ *
+ * В заголовке — только состояние записи (статус, проверка, пометка удаления);
+ * плашки — теми же рядами, что в редакторе (OperationHeader), первым блоком.
  */
 export function DeliveryViewModal({
   data,
@@ -153,73 +157,13 @@ export function DeliveryViewModal({
       width="97vw"
       title={
         d && data ? (
-          <Space size={4} wrap style={{ fontSize: 12 }}>
+          <Space size={6} wrap style={{ fontSize: 12 }}>
+            {/* Номер — как в заголовке редактора («Приёмка 21194»). */}
+            <Typography.Text strong>Приёмка {d.displayId}</Typography.Text>
             <Tag style={{ marginInlineEnd: 0 }} color={d.status.color ?? 'default'}>
               {d.status.label}
             </Tag>
             <ReviewBadge state={d.reviewState} />
-            {d.sourceDocumentIds.length === 0 && !d.edoSummary && (
-              <Tag style={{ marginInlineEnd: 0 }} color="gold">
-                Без документа
-              </Tag>
-            )}
-            {data.docKindLabel ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="blue">
-                {data.docKindLabel}
-                {data.docNumber ? ` №${data.docNumber}` : ''}
-              </Tag>
-            ) : null}
-            {data.siteName ? (
-              <Tag style={{ marginInlineEnd: 0 }}>Объект: {data.siteName}</Tag>
-            ) : null}
-            {data.contractorName ? (
-              <Tag style={{ marginInlineEnd: 0 }}>Подрядчик: {data.contractorName}</Tag>
-            ) : null}
-            {data.supplierName ? (
-              <Tag style={{ marginInlineEnd: 0 }}>Поставщик: {data.supplierName}</Tag>
-            ) : null}
-            {d.isManual ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="cyan">
-                Ручной внос
-              </Tag>
-            ) : null}
-            {d.vehiclePlate ? (
-              <Tag style={{ marginInlineEnd: 0 }}>Авто: {d.vehiclePlate}</Tag>
-            ) : null}
-            {data.docTotalSum != null ? (
-              <Tooltip title={d.edoSummary ? edoHeaderSumHint(d.edoSummary) : undefined}>
-                <Tag
-                  style={{ marginInlineEnd: 0 }}
-                  color={d.edoSummary?.ambiguous ? 'warning' : undefined}
-                >
-                  {data.docTotalLabel ?? 'Сумма'}: {formatMoneyRu(data.docTotalSum)}
-                  {edoShared ? ` · ${edoShared}` : ''}
-                </Tag>
-              </Tooltip>
-            ) : null}
-            {edoMismatch ? (
-              <Tooltip title={edoMismatch.hint}>
-                <Tag style={{ marginInlineEnd: 0 }} color="orange">
-                  {edoMismatch.text}
-                </Tag>
-              </Tooltip>
-            ) : null}
-            {d.inTransit ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="orange">
-                🚚 Транзит
-              </Tag>
-            ) : null}
-            {d.isAssets ? (
-              <Tag style={{ marginInlineEnd: 0 }} color="purple">
-                📦 ОС
-              </Tag>
-            ) : null}
-            {d.purpose ? (
-              <Tag style={{ marginInlineEnd: 0 }}>
-                Признак{d.recipientsPerDocument ? ' (общий)' : ''}:{' '}
-                {DELIVERY_PURPOSE_LABELS[d.purpose]}
-              </Tag>
-            ) : null}
             <PendingDeletionTag
               at={d.pendingDeletionAt}
               byEmail={d.pendingDeletionByUserEmail}
@@ -270,6 +214,51 @@ export function DeliveryViewModal({
     >
       {d ? (
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <OperationHeader style={{ marginBottom: 0 }}>
+            <HeaderRow label="Приёмка">
+              {data?.siteName && <HeaderChip label="Объект" value={data.siteName} />}
+              {data?.contractorName && <HeaderChip label="Подрядчик" value={data.contractorName} />}
+              {data?.supplierName && <HeaderChip label="Поставщик" value={data.supplierName} />}
+              {d.isManual && <HeaderChip color="cyan">Ручной внос</HeaderChip>}
+              {d.vehiclePlate && <HeaderChip label="Авто" value={d.vehiclePlate} />}
+            </HeaderRow>
+            <HeaderRow label="Документы">
+              {d.sourceDocumentIds.length === 0 && !d.edoSummary && (
+                <HeaderChip color="gold">Без документа</HeaderChip>
+              )}
+              {data?.docKindLabel && (
+                <HeaderChip
+                  color="blue"
+                  label={data.docKindLabel}
+                  value={data.docNumber ?? '— без номера —'}
+                />
+              )}
+              {data?.docTotalSum != null && (
+                <Tooltip title={d.edoSummary ? edoHeaderSumHint(d.edoSummary) : undefined}>
+                  <HeaderChip
+                    color={d.edoSummary?.ambiguous ? 'warning' : undefined}
+                    label={data.docTotalLabel ?? 'Сумма'}
+                    value={formatMoneyRu(data.docTotalSum) + (edoShared ? ` · ${edoShared}` : '')}
+                  />
+                </Tooltip>
+              )}
+              {edoMismatch && (
+                <Tooltip title={edoMismatch.hint}>
+                  <HeaderChip color="orange">{edoMismatch.text}</HeaderChip>
+                </Tooltip>
+              )}
+            </HeaderRow>
+            <HeaderRow label="Учёт">
+              {d.purpose && (
+                <HeaderChip
+                  label={`Признак${d.recipientsPerDocument ? ' (общий)' : ''}`}
+                  value={DELIVERY_PURPOSE_LABELS[d.purpose]}
+                />
+              )}
+              {d.inTransit && <HeaderChip color="orange">🚚 Транзит</HeaderChip>}
+              {d.isAssets && <HeaderChip color="purple">📦 ОС</HeaderChip>}
+            </HeaderRow>
+          </OperationHeader>
           <Space wrap>
             <Typography.Text>
               <b>Прибытие:</b>{' '}

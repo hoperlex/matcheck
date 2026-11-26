@@ -36,7 +36,13 @@ describe('groupDocumentsByKind', () => {
 describe('summarizeDates', () => {
   it('совпадающие даты дают одно значение', () => {
     const out = summarizeDates([doc({ id: 'a' }), doc({ id: 'b' })], 'docDate');
-    expect(out).toEqual({ text: '2026-08-26', known: 2, total: 2 });
+    expect(out).toEqual({
+      text: '2026-08-26',
+      first: '2026-08-26',
+      last: '2026-08-26',
+      known: 2,
+      total: 2,
+    });
   });
 
   it('разные даты дают диапазон', () => {
@@ -45,11 +51,18 @@ describe('summarizeDates', () => {
       'docDate',
     );
     expect(out!.text).toBe('2026-08-26 — 2026-08-27');
+    expect([out!.first, out!.last]).toEqual(['2026-08-26', '2026-08-27']);
   });
 
   it('дата не у всех — known меньше total, подмены нет', () => {
     const out = summarizeDates([doc({ id: 'a' }), doc({ id: 'b', docDate: null })], 'docDate');
-    expect(out).toEqual({ text: '2026-08-26', known: 1, total: 2 });
+    expect(out).toEqual({
+      text: '2026-08-26',
+      first: '2026-08-26',
+      last: '2026-08-26',
+      known: 1,
+      total: 2,
+    });
   });
 
   it('даты нет ни у кого — сводки нет', () => {

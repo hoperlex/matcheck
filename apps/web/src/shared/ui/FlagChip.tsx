@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Popconfirm, Tag, Tooltip, Typography } from 'antd';
+import { Popconfirm, Tooltip } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
+import { HeaderAddButton, HeaderChip } from './HeaderChip';
 
 /**
  * Кликабельный чип-флаг (ОС / Транзит) для шапки edit-модалок
@@ -8,7 +9,8 @@ import { EditOutlined } from '@ant-design/icons';
  *
  *  - value=true:  показывает цветной Tag «emoji label». Клик → Popconfirm
  *                 «Убрать признак?». При confirm дергает onChange(false).
- *  - value=false: показывает серый Tag «+ label» (приглашение поставить).
+ *  - value=false: показывает пунктирную кнопку «+ label» (приглашение поставить),
+ *                 такую же, как «+ Договор» и «+ Заказ».
  *                 Клик → Popconfirm «Поставить признак?» → onChange(true).
  *  - disabled:    Tag показывается только если value=true (как раньше);
  *                 клик не реагирует, появляется Tooltip с причиной.
@@ -43,27 +45,24 @@ export function FlagChip({
     if (!value) return null;
     return (
       <Tooltip title={`«${label}» нельзя изменить здесь`}>
-        <Tag color={color} style={{ marginInlineEnd: 0 }}>
+        <HeaderChip color={color}>
           {emoji} {label}
-        </Tag>
+        </HeaderChip>
       </Tooltip>
     );
   }
 
+  // Карандаш серый, как у остальных плашек: белый на светлом фоне тега не виден.
   const tag = value ? (
-    <Tag
+    <HeaderChip
       color={color}
-      style={{ marginInlineEnd: 0, cursor: 'pointer', userSelect: 'none' }}
+      interactive
+      suffix={<EditOutlined style={{ fontSize: 10, color: '#bfbfbf' }} />}
     >
       {emoji} {label}
-      <EditOutlined style={{ fontSize: 10, color: '#fff', marginLeft: 4, opacity: 0.7 }} />
-    </Tag>
+    </HeaderChip>
   ) : (
-    <Tag style={{ marginInlineEnd: 0, cursor: 'pointer', userSelect: 'none' }}>
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        + {label}
-      </Typography.Text>
-    </Tag>
+    <HeaderAddButton>{`+ ${label}`}</HeaderAddButton>
   );
 
   return (

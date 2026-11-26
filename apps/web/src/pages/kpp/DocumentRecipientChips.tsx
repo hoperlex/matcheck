@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Dropdown, Space, Tag, Typography } from 'antd';
+import { Dropdown, Space, Typography } from 'antd';
 import { DownOutlined } from '@ant-design/icons';
 import {
   allowedDeliveryPurposes,
@@ -8,6 +8,7 @@ import {
   type Delivery,
   type DeliveryPurpose,
 } from '@matcheck/contracts';
+import { HeaderChip } from '../../shared/ui/HeaderChip';
 import { InlineEditChip } from '../../shared/ui/InlineEditChip';
 import {
   DELIVERY_PURPOSE_LABELS,
@@ -102,7 +103,7 @@ export function DocumentRecipientChips({
 
   return (
     <Space
-      size={4}
+      size={6}
       wrap
       style={{ maxWidth: 'min(60vw, 620px)' }}
       onClick={(event) => event.stopPropagation()}
@@ -145,7 +146,7 @@ export function DocumentRecipientChips({
           )}
         </InlineEditChip>
       ) : (
-        <Tag style={{ marginInlineEnd: 0 }}>Получатель: {recipientLabel}</Tag>
+        <HeaderChip label="Получатель" value={recipientLabel} />
       )}
       {canEditPurpose ? (
         <Dropdown
@@ -168,15 +169,17 @@ export function DocumentRecipientChips({
               ),
           }}
         >
-          <Tag
+          <HeaderChip
             color={doc.ownPurpose ? 'blue' : undefined}
-            style={{ cursor: disabled ? 'not-allowed' : 'pointer', marginInlineEnd: 0 }}
-          >
-            Признак: {purposeLabel} <DownOutlined />
-          </Tag>
+            interactive
+            disabled={disabled}
+            label="Признак"
+            value={purposeLabel}
+            suffix={<DownOutlined style={{ fontSize: 10 }} />}
+          />
         </Dropdown>
       ) : (
-        <Tag style={{ marginInlineEnd: 0 }}>Признак: {purposeLabel}</Tag>
+        <HeaderChip label="Признак" value={purposeLabel} />
       )}
     </Space>
   );

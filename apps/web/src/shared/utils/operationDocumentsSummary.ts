@@ -31,6 +31,9 @@ export function groupDocumentsByKind(documents: OperationSourceDocument[]): Docu
 export type DateSummary = {
   /** Одна дата, если у всех совпала; иначе «раньшая — поздняя». */
   text: string;
+  /** Раньшая и поздняя даты (ISO) — для показа в своём формате. */
+  first: string;
+  last: string;
   /** У скольких документов дата есть и сколько их всего — для честной подписи. */
   known: number;
   total: number;
@@ -53,6 +56,8 @@ export function summarizeDates(
   const last = sorted[sorted.length - 1]!;
   return {
     text: first === last ? first : `${first} — ${last}`,
+    first,
+    last,
     known: values.length,
     total: documents.length,
   };

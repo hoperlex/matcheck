@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button, Popconfirm, Popover, Space, Tag, Typography } from 'antd';
 import { DisconnectOutlined } from '@ant-design/icons';
 import type { DeliverySupplierOrder } from '@matcheck/contracts';
+import { HeaderChip } from '../../shared/ui/HeaderChip';
 import { formatMoneyRu } from '../../shared/utils/formatRu';
 import {
   APPROVAL_STATE_COLORS,
@@ -76,20 +77,14 @@ export function SupplierOrderChip({
 
   return (
     <Popover content={details} trigger="click" placement="bottomLeft" open={open} onOpenChange={setOpen}>
-      <Tag
+      <HeaderChip
         color={APPROVAL_STATE_COLORS[worst]}
-        style={{ marginInlineEnd: 0, cursor: 'pointer' }}
+        interactive
         data-testid="supplier-order-chip"
         data-state={worst}
-      >
-        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-          {orders.length > 1 ? 'Заказы:' : 'Заказ:'}
-        </Typography.Text>{' '}
-        <Typography.Text strong style={{ fontSize: 12 }}>
-          {shown}
-          {rest > 0 ? ` +${rest}` : ''}
-        </Typography.Text>
-      </Tag>
+        label={orders.length > 1 ? 'Заказы' : 'Заказ'}
+        value={`${shown}${rest > 0 ? ` +${rest}` : ''}`}
+      />
     </Popover>
   );
 }
