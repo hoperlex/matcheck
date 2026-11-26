@@ -28,6 +28,9 @@ vi.hoisted(() => {
   if (process.env.TEST_DATABASE_URL) process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
   // Иначе полтора десятка неудач подряд честно проспали бы минуты.
   process.env.AUTH_BACKOFF_BASE_MS = '1';
+  // Протокол «одна машина — одна приёмка» на всех объектах: вход и refresh
+  // старой сборки он не закрывает (решение 26.11).
+  process.env.GROUP_CLAIM_SITES = '*';
 });
 
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -65,6 +68,9 @@ suite('POST /auth/login — верный пароль пускает всегд�
   const contractorEmail = `contractor-${contractorId}@example.com`;
   const observerId = randomUUID();
   const observerEmail = `observer-${observerId}@example.com`;
+  const inspectorId = randomUUID();
+  const inspectorEmail = `inspector-${inspectorId}@example.com`;
+  const inspectorSite = randomUUID();
 
   const login = (body: Record<string, unknown>, headers: Record<string, string> = {}) =>
     app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: body, headers });
@@ -120,6 +126,10 @@ suite('POST /auth/login — верный пароль пускает всегд�
       (${inactiveId}, ${inactiveEmail}, ${hash}, 'manager', false),
       (${contractorId}, ${contractorEmail}, ${hash}, 'contractor', true),
       (${observerId}, ${observerEmail}, ${hash}, 'observer', true)`;
+    await sql`INSERT INTO sites (id, code, name)
+      VALUES (${inspectorSite}, ${`AL${Date.now() % 100000}`}, 'Объект входа')`;
+    await sql`INSERT INTO users (id, email, password_hash, role, is_active, site_id) VALUES
+      (${inspectorId}, ${inspectorEmail}, ${hash}, 'inspector_kpp', true, ${inspectorSite})`;
   });
 
   beforeEach(async () => {
@@ -131,12 +141,13 @@ suite('POST /auth/login — верный пароль пускает всегд�
   afterAll(async () => {
     await app?.close();
     if (!sql) return;
-    const ids = [userId, inactiveId, contractorId];
+    const ids = [userId, inactiveId, contractorId, observerId, inspectorId];
     await sql`DELETE FROM refresh_tokens WHERE session_id IN
       (SELECT id FROM sessions WHERE user_id = ANY(${ids}))`;
     await sql`DELETE FROM sessions WHERE user_id = ANY(${ids})`;
     await sql`DELETE FROM auth_events WHERE user_id = ANY(${ids})`;
     await sql`DELETE FROM users WHERE id = ANY(${ids})`;
+    await sql`DELETE FROM sites WHERE id = ${inspectorSite}`;
     await sql.end({ timeout: 5 });
   });
 
@@ -226,6 +237,46 @@ suite('POST /auth/login — верный пароль пускает всегд�
     );
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toBe('web_only_role');
+  });
+
+  /** Сессия по refresh-токену из ответа мобильного входа. */
+  const sessionOf = async (refreshToken: string) => {
+    const [row] = await sql<{ id: string; last_seen_capabilities: string | null }[]>`
+      SELECT s.id, s.last_seen_capabilities FROM sessions s
+        JOIN refresh_tokens t ON t.session_id = s.id
+       WHERE t.token_hash = ${sha256Hex(refreshToken)}`;
+    return row!;
+  };
+
+  it('старая сборка инспектора на объекте с протоколом занятия входит и обновляет токен', async () => {
+    const res = await login(
+      { email: inspectorEmail, password: PASSWORD },
+      { 'x-client-type': 'mobile', 'user-agent': 'matcheck-android/1.0.40 (Build 41; Android 36)' },
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const token = res.json().refreshToken as string;
+    // Без заголовка возможностей сессия числится необновлённой — по ней
+    // объединение машин отказывает «планшеты не обновлены».
+    expect((await sessionOf(token)).last_seen_capabilities).toBeNull();
+
+    const refreshed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { 'x-client-type': 'mobile', authorization: `Bearer ${token}` },
+    });
+    expect(refreshed.statusCode, refreshed.body).toBe(200);
+    expect(refreshed.json().accessToken).toBeTruthy();
+  });
+
+  it('новая сборка инспектора: возможности клиента записаны в сессию', async () => {
+    const res = await login(
+      { email: inspectorEmail, password: PASSWORD },
+      { 'x-client-type': 'mobile', 'x-matcheck-capabilities': 'source_groups_v1,group_claim_v1' },
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await sessionOf(res.json().refreshToken as string)).last_seen_capabilities).toBe(
+      'source_groups_v1,group_claim_v1',
+    );
   });
 
   it('роль observer с веба входит штатно', async () => {

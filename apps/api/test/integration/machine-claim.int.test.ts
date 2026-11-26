@@ -50,6 +50,15 @@ suite('протокол «одна машина — одна приёмка» (�
     return { root, ids: ids.sort() };
   }
 
+  /** Две отправки, объединённые в одну машину (как после «Объединить»). */
+  async function seedMergedMachine(siteId = site) {
+    const a = await seedMachine(siteId);
+    const b = await seedMachine(siteId);
+    await sql`INSERT INTO machine_merges (member_root_id, target_root_id, merge_id)
+              VALUES (${b.root}, ${a.root}, ${randomUUID()})`;
+    return { root: a.root, ids: [...a.ids, ...b.ids].sort() };
+  }
+
   async function revisionOf(docId: string) {
     const [r] = await db
       .select({ g: dg.documentGroupIdSql(), r: dg.documentGroupRevisionSql() })
@@ -149,13 +158,27 @@ suite('протокол «одна машина — одна приёмка» (�
     expect(second.claimed).toBe(false);
   });
 
-  it('старый клиент без group_claim_v1 на защищённом объекте → 426, ничего не записано', async () => {
+  it('старый клиент без group_claim_v1, обычная машина защищённого объекта → прежний путь', async () => {
     const m = await seedMachine();
-    await expect(create(m.ids, { caps: [] })).rejects.toMatchObject({
-      statusCode: 426,
-      name: 'client_outdated',
+    const old = await create(m.ids, { caps: [] });
+    expect(old.claimed).toBe(false);
+    expect((await sql`SELECT 1 FROM deliveries WHERE id = ${old.id}`).length).toBe(1);
+    // Новый планшет после старого второй приёмки не создаст.
+    const { g, r } = await revisionOf(m.ids[0]!);
+    await expect(create(m.ids, { groupId: g, revision: r })).rejects.toMatchObject({
+      conflict: { error: 'group_claimed', claimedByOperationId: old.id },
     });
-    expect((await sql`SELECT 1 FROM deliveries WHERE site_id = ${site}`).length).toBe(0);
+  });
+
+  it('старый клиент, объединённая машина → 426 на любом объекте, ничего не записано', async () => {
+    for (const s of [site, otherSite]) {
+      const m = await seedMergedMachine(s);
+      await expect(create(m.ids, { caps: [], siteId: s })).rejects.toMatchObject({
+        statusCode: 426,
+        name: 'client_outdated',
+      });
+      expect((await sql`SELECT 1 FROM deliveries WHERE site_id = ${s}`).length).toBe(0);
+    }
   });
 
   it('два параллельных создания по машине → одно, второе group_claimed', async () => {
@@ -176,15 +199,36 @@ suite('протокол «одна машина — одна приёмка» (�
     expect((await sql`SELECT 1 FROM deliveries WHERE site_id = ${site}`).length).toBe(1);
   });
 
-  it('старый снимок без groupId: свободная машина → group_changed, занятая → group_claimed', async () => {
+  it('снимок старой сборки без groupId от обновлённого приложения: свободная обычная машина — принят и занял её', async () => {
     const m = await seedMachine();
+    const first = await create(m.ids, { groupId: null, revision: null });
+    expect(first.claimed).toBe(true);
     await expect(create(m.ids, { groupId: null, revision: null })).rejects.toMatchObject({
-      conflict: { error: 'group_changed' },
+      conflict: { error: 'group_claimed', claimedByOperationId: first.id },
     });
     const { g, r } = await revisionOf(m.ids[0]!);
-    await create(m.ids, { groupId: g, revision: r });
-    await expect(create(m.ids, { groupId: null, revision: null })).rejects.toMatchObject({
-      conflict: { error: 'group_claimed' },
+    await expect(create(m.ids, { groupId: g, revision: r })).rejects.toMatchObject({
+      conflict: { error: 'group_claimed', claimedByOperationId: first.id },
+    });
+  });
+
+  it('снимок старой сборки без groupId: неполный состав → group_incomplete, объединённая → group_changed', async () => {
+    const m = await seedMachine();
+    await expect(create([m.ids[0]!], { groupId: null, revision: null })).rejects.toMatchObject({
+      conflict: { error: 'group_incomplete' },
+    });
+    const merged = await seedMergedMachine();
+    await expect(create(merged.ids, { groupId: null, revision: null })).rejects.toMatchObject({
+      conflict: { error: 'group_changed' },
+    });
+    expect((await sql`SELECT 1 FROM deliveries WHERE site_id = ${site}`).length).toBe(0);
+  });
+
+  it('форма новой сборки по устаревшей ревизии → group_changed, как раньше', async () => {
+    const m = await seedMachine();
+    const { g, r } = await revisionOf(m.ids[0]!);
+    await expect(create(m.ids, { groupId: g, revision: Number(r) + 1 })).rejects.toMatchObject({
+      conflict: { error: 'group_changed' },
     });
   });
 

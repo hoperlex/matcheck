@@ -353,15 +353,30 @@ suite(
       expect((await sql`SELECT 1 FROM deliveries WHERE id = ${second.id}`).length).toBe(0);
     });
 
-    it('объект с защитой: тело 1.0.40 без заголовка — 426, ничего не записано', async () => {
+    it('объект с защитой: тело 1.0.40 без заголовка — как раньше, без занятия машины', async () => {
       asInspectorOf(protectedSite);
       const m = await seedMachine(protectedSite);
       const body = tabletBody(m, protectedSite, { legacy: true });
 
       const res = await post(body, { capabilitiesHeader: false });
-      expect(res.statusCode).toBe(426);
-      expect((await sql`SELECT 1 FROM deliveries WHERE site_id = ${protectedSite}`).length).toBe(0);
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await sql`SELECT 1 FROM delivery_items WHERE delivery_id = ${body.id}`).length).toBe(
+        2,
+      );
       expect(await claimsOf(m.root)).toHaveLength(0);
+    });
+
+    it('объект с защитой: тело 1.0.40 из «Очереди», отправленное уже обновлённым приложением — принято, машина занята', async () => {
+      asInspectorOf(protectedSite);
+      const m = await seedMachine(protectedSite);
+      const body = tabletBody(m, protectedSite, { legacy: true });
+
+      const res = await post(body, { capabilitiesHeader: true });
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await sql`SELECT 1 FROM delivery_items WHERE delivery_id = ${body.id}`).length).toBe(
+        2,
+      );
+      expect((await claimsOf(m.root)).map((c) => c.delivery_id)).toEqual([body.id]);
     });
   },
 );

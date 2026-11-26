@@ -15,12 +15,22 @@
 // неё — прежний путь без единой новой проверки.
 //
 // Кто как проходит.
-//   * Клиент без group_claim_v1 (старая сборка, старая вкладка портала) —
-//     426 client_outdated: typed-конфликты он не поймёт, а молча создать
-//     вторую приёмку нельзя. Старое приложение замораживает такую мутацию с
-//     целыми данными; новая сборка её размораживает и отправляет заново.
+//   * Клиент без group_claim_v1 (старая сборка, старая вкладка портала):
+//     - обычная машина — прежний путь, как до выпуска (решение 26.11). Typed-
+//       отказ он не поймёт, а 426 старое приложение кладёт в «Очередь» ошибкой
+//       с кнопкой «Очистить». Риск двух приёмок здесь тот же, что до выпуска;
+//       новый планшет после старого всё равно получит group_claimed (живая
+//       приёмка без занятия занимает машину);
+//     - объединённая машина — 426 client_outdated: её безопасность держится
+//       только на протоколе. Старое приложение замораживает мутацию с целыми
+//       данными; новая сборка её размораживает и отправляет заново. На объекте
+//       с необновлёнными планшетами объединить нельзя (machine-merge.ts,
+//       outdatedTabletSessions), так что встречается это только у планшета,
+//       молчавшего дольше недели.
 //   * Планшет (мобильный клиент) — полные проверки: занятость, groupId и
-//     ревизия формы, полнота состава.
+//     ревизия формы, полнота состава. Снимок старой сборки без groupId,
+//     отправленный уже обновлённым приложением, на обычной машине принимается
+//     (см. проверку 2).
 //   * Портал — только занятость: менеджер может оформить приёмку и по части
 //     машины, но не вторую на уже занятую машину.
 
@@ -100,7 +110,11 @@ export async function prepareMachineClaim(
   // блокируем, чтобы прежний путь остался ровно прежним.
   const head = await resolveHead(tx, { documentId: first });
   const merged = head ? await isMergedHead(tx, head) : false;
-  if (!groupClaimEnabledForSite(args.siteId) && !merged) return null;
+  if (!merged) {
+    if (!groupClaimEnabledForSite(args.siteId)) return null;
+    // Старая сборка на обычной машине — прежний путь (шапка файла).
+    if (!clientSupportsGroupClaim(args.ctx.capabilities)) return null;
+  }
   if (!clientSupportsGroupClaim(args.ctx.capabilities)) throw new ClientOutdatedError();
 
   // Замок машины — голова, участники, дети, документы. Между проверкой и
@@ -175,14 +189,20 @@ export async function prepareMachineClaim(
   }
 
   // 2) Планшет: форма открыта по той же машине и той же ревизии, состав полный.
-  //    Нет groupId/ревизии — это мутация, созданная старой сборкой и отправленная
-  //    уже обновлённым приложением: снимок устарел, пусть перепроверит.
+  //    Нет groupId/ревизии — мутация, созданная старой сборкой и отправленная
+  //    уже обновлённым приложением (лежала в «Очереди» при обновлении). На
+  //    обычной машине её принимаем, как приняли бы от самой старой сборки:
+  //    машина свободна (проверка 1), полнота состава проверяется ниже. Иначе
+  //    неотправленная при обновлении приёмка ушла бы в карантин. Объединённая
+  //    машина (перепроверка под замком) — состав изменился, пусть перепроверит.
   if (args.ctx.mobile) {
+    const legacySnapshot = !args.clientGroupId || args.clientGroupRevision == null;
+    const acceptLegacy = legacySnapshot && !(await isMergedHead(tx, composition.groupId));
     if (
-      !args.clientGroupId ||
-      args.clientGroupRevision == null ||
-      args.clientGroupId !== composition.groupId ||
-      args.clientGroupRevision !== composition.groupRevision
+      !acceptLegacy &&
+      (legacySnapshot ||
+        args.clientGroupId !== composition.groupId ||
+        args.clientGroupRevision !== composition.groupRevision)
     ) {
       throw new GroupConflictError({
         error: 'group_changed',
