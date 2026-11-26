@@ -1823,6 +1823,10 @@ export const deliveries = pgTable(
     // создании (createDelivery) и потом не меняется. Миграция 0153.
     isManual: boolean('is_manual').notNull().default(false),
     purpose: varchar('purpose', { length: 24 }),
+    // Признак поставлен справочником «Контрагенты → Объекты и вид» (0161), а не
+    // человеком. Только такой признак пересчитывается при смене подрядчика или
+    // объекта; ручной выбор не трогается. Без признака флаг ничего не значит.
+    purposeFromDirectory: boolean('purpose_from_directory').notNull().default(false),
     recipientsPerDocument: boolean('recipients_per_document').notNull().default(false),
     confirmedByMolUserId: uuid('confirmed_by_mol_user_id').references(() => users.id, {
       onDelete: 'set null',

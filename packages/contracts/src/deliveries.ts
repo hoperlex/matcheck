@@ -8,6 +8,7 @@ import {
 } from './source-documents.js';
 import { DispatcherCheckFieldsShape, ReviewFieldsShape } from './review.js';
 import { GroupOperationFields } from './group-operations.js';
+import { ContractorSiteKindSchema, type ContractorSiteKind } from './customer-counterparties.js';
 
 export const ItemKindSchema = z.enum(['material', 'asset']);
 export type ItemKind = z.infer<typeof ItemKindSchema>;
@@ -164,6 +165,103 @@ export function reconcileDeliveryPurpose(
   if (nextKind === 'contractor' && purpose === 'own_forces') return null;
   return purpose;
 }
+
+/**
+ * Что справочник «Контрагенты → Объекты и вид» говорит о признаке для пары
+ * подрядчик × объект: какой ставить сам (`auto`) и какие пункты подсветить.
+ * «Оба вида» (реализация и давальческий) однозначного признака не дают:
+ * ставить нечего, подсвечиваются оба — «Реализация + давальческий» люди в
+ * таких приёмках не выбирали (0 из 70 на 26.11.2026).
+ */
+export function directoryPurposeHint(kind: ContractorSiteKind | null): {
+  auto: DeliveryPurpose | null;
+  highlight: DeliveryPurpose[];
+} {
+  if (kind === null) return { auto: null, highlight: [] };
+  if (kind === 'realization_tolling') {
+    return { auto: null, highlight: ['realization', 'tolling_act'] };
+  }
+  return { auto: kind, highlight: [kind] };
+}
+
+/** Состояние признака до записи и что происходит с приёмкой. */
+export type DeliveryPurposeWrite = {
+  prevKind: DeliveryRecipientKind;
+  nextKind: DeliveryRecipientKind;
+  purpose: DeliveryPurpose | null;
+  /** Текущий признак поставил справочник (deliveries.purpose_from_directory). */
+  fromDirectory: boolean;
+  /** Явный выбор человека (PATCH /purpose, upsert с признаком) — главнее всего. */
+  chosen?: DeliveryPurpose;
+  /** Приёмка создаётся. */
+  insert: boolean;
+  /** Фактически сменились подрядчик, МОЛ или объект (сравнение под блокировкой). */
+  pairChanged: boolean;
+  /** Планшет впервые подтверждает приёмку. */
+  firstConfirm: boolean;
+  /** false в режиме «Разные получатели»: документы наследуют общий признак. */
+  directoryAllowed: boolean;
+  /** directoryPurposeHint(вид новой пары).auto; null — пары нет, «оба», скрыта. */
+  nextAuto: DeliveryPurpose | null;
+};
+
+/**
+ * Нужен ли вид справочника для новой пары: без него правило не обходится
+ * только здесь, в остальных случаях запрос к справочнику не делается.
+ */
+export function deliveryPurposeNeedsDirectory(a: Omit<DeliveryPurposeWrite, 'nextAuto'>): boolean {
+  if (a.chosen !== undefined) return false;
+  if (a.nextKind !== 'contractor' || !a.directoryAllowed) return false;
+  if (a.fromDirectory && a.pairChanged) return true;
+  const base = reconcileDeliveryPurpose(a.prevKind, a.nextKind, a.purpose);
+  return base === null && (a.insert || a.pairChanged || a.firstConfirm);
+}
+
+/**
+ * Признак после записи приёмки с учётом справочника (миграция 0161).
+ *   - явный выбор человека пишется как есть и становится ручным;
+ *   - правило получателя (reconcileDeliveryPurpose) работает как раньше;
+ *   - подставленный признак принадлежит паре подрядчик × объект: сменилась
+ *     пара — пересчитывается по новой (нет однозначного вида — сбрасывается);
+ *   - пустой признак заполняется справочником только при создании, фактической
+ *     смене пары или первом подтверждении. Сохранение комментария и повторная
+ *     синхронизация планшета его не трогают: признак входит в хеш выгрузки 1С,
+ *     и лишняя запись вернула бы выгруженную приёмку в очередь;
+ *   - ручной признак не перезаписывается никогда.
+ */
+export function nextDeliveryPurpose(a: DeliveryPurposeWrite): {
+  purpose: DeliveryPurpose | null;
+  fromDirectory: boolean;
+} {
+  if (a.chosen !== undefined) return { purpose: a.chosen, fromDirectory: false };
+  const base = reconcileDeliveryPurpose(a.prevKind, a.nextKind, a.purpose);
+  if (a.fromDirectory && a.pairChanged) {
+    if (a.nextKind === 'mol') return { purpose: base, fromDirectory: false };
+    const p = a.nextKind === 'contractor' && a.directoryAllowed ? a.nextAuto : null;
+    return { purpose: p, fromDirectory: p !== null };
+  }
+  if (
+    a.nextKind === 'contractor' &&
+    a.directoryAllowed &&
+    base === null &&
+    a.nextAuto !== null &&
+    (a.insert || a.pairChanged || a.firstConfirm)
+  ) {
+    return { purpose: a.nextAuto, fromDirectory: true };
+  }
+  return { purpose: base, fromDirectory: a.fromDirectory && base !== null && base === a.purpose };
+}
+
+/**
+ * Вид справочника для пары подрядчик × объект приёмки — подсказка карточки.
+ * `manual` — вид указан вручную в карточке контрагента, иначе он из 1С.
+ */
+export const DeliveryPurposeHintSchema = z.object({
+  kind: ContractorSiteKindSchema,
+  manual: z.boolean(),
+  siteCode: z.string(),
+});
+export type DeliveryPurposeHint = z.infer<typeof DeliveryPurposeHintSchema>;
 
 /** Независимое наследование получателя и признака у связанного документа. */
 export type DocumentRecipientState = {
@@ -384,6 +482,14 @@ export const DeliverySchema = z.object({
   // null у существующих приёмок, которым признак ещё не назначен.
   // optional сохраняет совместимость старых офлайн-снимков мобильного клиента.
   purpose: DeliveryPurposeSchema.nullable().optional(),
+  /** Признак поставил справочник «Объекты и вид», а не человек (0161). */
+  purposeFromDirectory: z.boolean().optional(),
+  /**
+   * Вид пары подрядчик × объект в справочнике — подсказка «Признака» в
+   * карточке. Только одиночный DTO (GET /:id, ответы мутаций); null — получатель
+   * не подрядчик, пары нет или она скрыта.
+   */
+  purposeHint: DeliveryPurposeHintSchema.nullable().optional(),
   recipientsPerDocument: z.boolean().optional(),
   documentRecipients: z.array(DocumentRecipientSchema).optional(),
   /**

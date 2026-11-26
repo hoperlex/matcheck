@@ -61,7 +61,10 @@ export function sitesVersionOf(rows: readonly VersionRow[]): string {
   return createHash('md5').update(parts.join(',')).digest('hex');
 }
 
-function effectiveKind(r: VersionRow): ContractorSiteKind | null {
+/** Действующий вид: ручной главнее 1С; 'none' — скрыт (общий для карточки и подсказки приёмки). */
+export function effectiveKind(
+  r: Pick<VersionRow, 'onecKind' | 'manualKind'>,
+): ContractorSiteKind | null {
   if (r.manualKind === 'none') return null;
   return (r.manualKind ?? r.onecKind) as ContractorSiteKind | null;
 }

@@ -90,6 +90,7 @@ import {
   reconcileLinkedDocumentPurposes,
   type RecipientWrite,
 } from '../domain/operations/delivery-purpose.js';
+import { directorySiteKindFor } from '../domain/contractor-sites/purpose-hint.js';
 import { deliveryPurposeFilterCondition } from '../domain/operations/delivery-purpose-filter.js';
 import { touchSourceDocuments } from '../domain/sourceDocuments/touch.js';
 import { isDeliveryDowngrade } from '../domain/operations/status-guard.js';
@@ -650,6 +651,7 @@ function assembleDeliveryDto(
     isAssets: d.isAssets,
     isManual: d.isManual,
     purpose: DeliveryPurposeSchema.nullable().parse(d.purpose),
+    purposeFromDirectory: d.purpose !== null && d.purposeFromDirectory,
     recipientsPerDocument: d.recipientsPerDocument,
     documentRecipients,
     recipientDocumentCount: sources.length + freeEdoDocuments.length,
@@ -751,8 +753,11 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
   const documentRecipients = await loadDocumentRecipients(app, [id]);
   const freeEdoDocuments = await loadFreeEdoDocuments(app, [id]);
   const edoInputs = await loadEdoSummaryInputs(app.db, [id]);
+  // Подсказка «Признака» — вид пары подрядчик × объект в справочнике «Объекты и
+  // вид». Только в одиночном DTO: список её не показывает, лишних запросов нет.
+  const purposeHint = await directorySiteKindFor(app.db, r.d.contractorId, r.d.siteId);
 
-  return assembleDeliveryDto(
+  const dto = assembleDeliveryDto(
     r,
     items,
     photos,
@@ -772,6 +777,7 @@ async function buildDeliveryDto(app: any, id: string, viewerRole?: string | null
     freeEdoDocuments.get(id) ?? [],
     edoInputs.get(id) ?? [],
   );
+  return { ...dto, purposeHint };
 }
 
 // Батч-построение DTO для списка: ~5 запросов на страницу вместо 4×N (устранение
@@ -1718,9 +1724,10 @@ export async function deliveryRoutes(rawApp: FastifyInstance): Promise<void> {
             },
           );
         }
+        // Выбор человека: дальше признак ручной, справочник его не трогает.
         await tx
           .update(deliveries)
-          .set({ purpose: req.body.purpose, updatedAt: new Date() })
+          .set({ purpose: req.body.purpose, purposeFromDirectory: false, updatedAt: new Date() })
           .where(eq(deliveries.id, d.id));
         return { error: null, d };
       });
@@ -3917,6 +3924,17 @@ async function createDelivery(
             ctx: claimCtx,
           })
         : null;
+    // Получатель — МОЛ → «Свои силы»; подрядчик — вид пары подрядчик × объект
+    // из справочника «Объекты и вид» (domain/operations/delivery-purpose.ts).
+    const initialPurpose = await purposeOnInsert(
+      tx,
+      {
+        contractorId: input.contractorId ?? null,
+        recipientMolId: input.recipientMolId ?? null,
+      },
+      input.siteId ?? null,
+      input.purpose,
+    );
     const [created] = await tx
       .insert(deliveries)
       .values({
@@ -3926,13 +3944,8 @@ async function createDelivery(
         supplierId: input.supplierId ?? null,
         contractorId: input.contractorId ?? null,
         recipientMolId: input.recipientMolId ?? null,
-        // Получатель — МОЛ → «Свои силы» (domain/operations/delivery-purpose.ts).
-        purpose:
-          input.purpose ??
-          purposeOnInsert({
-            contractorId: input.contractorId ?? null,
-            recipientMolId: input.recipientMolId ?? null,
-          }),
+        purpose: initialPurpose.purpose,
+        purposeFromDirectory: initialPurpose.fromDirectory,
         vehiclePlate: input.vehiclePlate ?? null,
         driverName: input.driverName ?? null,
         arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,
@@ -4238,7 +4251,12 @@ async function updateDelivery(
     // признака (PATCH /:id/purpose) берёт ту же блокировку и не впишет «Свои
     // силы» подрядчику между чтением и записью. Нет строки — UPDATE ниже
     // вернёт ноль строк и разберёт причину сам.
-    const reconciled = await lockPurposeForRecipientWrite(tx, id, nextRecipient, input.purpose);
+    // Объект и подтверждение — для событий справочника «Объекты и вид»: признак
+    // подставляется только при фактической смене пары или первом подтверждении.
+    const reconciled = await lockPurposeForRecipientWrite(tx, id, nextRecipient, input.purpose, {
+      nextSiteId: input.siteId,
+      wantsConfirm,
+    });
     const updatedRows = await tx
       .update(deliveries)
       .set({
@@ -4246,7 +4264,10 @@ async function updateDelivery(
         siteId: input.siteId,
         supplierId: input.supplierId ?? null,
         ...(nextRecipient !== 'keep' && nextRecipient),
-        ...(reconciled && { purpose: reconciled.purpose }),
+        ...(reconciled && {
+          purpose: reconciled.purpose,
+          purposeFromDirectory: reconciled.fromDirectory,
+        }),
         vehiclePlate: input.vehiclePlate ?? null,
         driverName: input.driverName ?? null,
         arrivedAt: input.arrivedAt ? new Date(input.arrivedAt) : null,

@@ -1,7 +1,11 @@
 // Признак приёмки при записи получателя.
 //
 // Правило одно (reconcileDeliveryPurpose в контракте): получатель стал МОЛ —
-// «Свои силы»; у подрядчика «Свои силы» не бывает. Запись получателя идёт
+// «Свои силы»; у подрядчика «Свои силы» не бывает. Поверх него — справочник
+// «Контрагенты → Объекты и вид» (nextDeliveryPurpose, миграция 0161): у
+// подрядчика пустой признак заполняется видом пары подрядчик × объект при
+// создании, фактической смене пары или первом подтверждении; подставленный
+// признак (purpose_from_directory) следует за парой, ручной — никогда. Запись получателя идёт
 // разными путями — upsert (веб и планшет), парная приёмка перемещения, — а
 // признак ставится отдельным PATCH. Чтобы их пересечение не оставило
 // «подрядчик + Свои силы», каждый путь работает по одной схеме: заблокировать
@@ -14,13 +18,17 @@ import { and, eq, isNull } from 'drizzle-orm';
 import {
   allowedDeliveryPurposes,
   DeliveryPurposeSchema,
+  deliveryPurposeNeedsDirectory,
   deliveryRecipientKind,
+  directoryPurposeHint,
+  nextDeliveryPurpose,
   reconcileDocumentPurpose,
-  reconcileDeliveryPurpose,
+  type DeliveryPurposeWrite,
   type DocumentRecipientState,
   type DeliveryPurpose,
 } from '@matcheck/contracts';
 import { deliveries, deliveryEdoMatches, deliverySources } from '../../db/schema.js';
+import { directorySiteKindFor } from '../contractor-sites/purpose-hint.js';
 
 export type RecipientPair = { contractorId: string | null; recipientMolId: string | null };
 export type GeneralRecipient = RecipientPair & { purpose: DeliveryPurpose | null };
@@ -133,9 +141,76 @@ export async function reconcileLinkedDocumentPurposes(
   }
 }
 
-/** Признак новой приёмки: до неё получателя не было. */
-export function purposeOnInsert(next: RecipientPair): DeliveryPurpose | null {
-  return reconcileDeliveryPurpose(null, deliveryRecipientKind(next), null);
+/** Признак и его источник — пишутся в строку приёмки вместе. */
+export type PurposeOutcome = { purpose: DeliveryPurpose | null; fromDirectory: boolean };
+
+/**
+ * Считает признак по правилу и, только если правилу он нужен, берёт вид
+ * пары подрядчик × объект из справочника (лишних запросов на upsert планшета нет).
+ */
+async function decidePurpose(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ex: any,
+  a: Omit<DeliveryPurposeWrite, 'nextAuto'>,
+  next: { contractorId: string | null; siteId: string | null },
+): Promise<PurposeOutcome> {
+  let nextAuto: DeliveryPurpose | null = null;
+  if (deliveryPurposeNeedsDirectory(a)) {
+    const found = await directorySiteKindFor(ex, next.contractorId, next.siteId);
+    nextAuto = directoryPurposeHint(found?.kind ?? null).auto;
+  }
+  return nextDeliveryPurpose({ ...a, nextAuto });
+}
+
+/**
+ * Признак новой приёмки: до неё получателя не было. Явный выбор
+ * (`chosen`, upsert портала с признаком) пишется как есть.
+ */
+export async function purposeOnInsert(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ex: any,
+  next: RecipientPair,
+  siteId: string | null,
+  chosen?: DeliveryPurpose,
+): Promise<PurposeOutcome> {
+  return decidePurpose(
+    ex,
+    {
+      prevKind: null,
+      nextKind: deliveryRecipientKind(next),
+      purpose: null,
+      fromDirectory: false,
+      chosen,
+      insert: true,
+      pairChanged: false,
+      firstConfirm: false,
+      directoryAllowed: true,
+    },
+    { contractorId: next.contractorId, siteId },
+  );
+}
+
+/**
+ * Режим «Разные получатели»: документу дали своего получателя, а признак он
+ * наследует от шапки, где его поставил справочник для ДРУГОГО получателя.
+ * Такой признак документу не подходит и ушёл бы в 1С за чужую УПД — документ
+ * получает собственный пустой признак (человек выберет сам).
+ */
+export function detachDirectoryPurpose(
+  general: {
+    contractorId: string | null;
+    recipientMolId: string | null;
+    purpose: DeliveryPurpose | null;
+  },
+  generalFromDirectory: boolean,
+  doc: DocumentRecipientState,
+): DocumentRecipientState {
+  if (!generalFromDirectory || general.purpose === null) return doc;
+  if (doc.ownPurpose || !doc.ownRecipient) return doc;
+  if (doc.contractorId === general.contractorId && doc.recipientMolId === general.recipientMolId) {
+    return doc;
+  }
+  return { ...doc, ownPurpose: true, purpose: null };
 }
 
 /** Текущее значение колонки; неизвестное (CHECK его не пустит) — как есть. */
@@ -147,9 +222,16 @@ function currentPurpose(raw: string | null): { known: DeliveryPurpose | null } |
 
 /**
  * Блокирует строку приёмки (FOR UPDATE) и возвращает признак, который должен
- * лечь вместе с новым получателем. Вызывать первым оператором транзакции,
+ * лечь вместе с новым получателем, и его источник (`fromDirectory` пишется в
+ * purpose_from_directory). Вызывать первым оператором транзакции,
  * которая затем пишет получателя: конкурентная правка признака дождётся
  * блокировки и проверит его уже против нового получателя.
+ *
+ * События справочника считаются по ЗАБЛОКИРОВАННОЙ строке: `nextSiteId` —
+ * объект, который ляжет в строку (undefined — объект не пишется), `wantsConfirm`
+ * — upsert подтверждает приёмку. Портал шлёт объект при каждом «Сохранить», а
+ * планшет — получателя при каждом upsert: событием это становится, только если
+ * значение действительно другое.
  *
  * Присланный признак (`chosenPurpose`) проверяется здесь же — по получателю,
  * который реально ляжет в строку. При `'keep'` это получатель из строки, а не
@@ -165,14 +247,24 @@ export async function lockPurposeForRecipientWrite(
   deliveryId: string,
   next: RecipientWrite,
   chosenPurpose?: DeliveryPurpose,
+  opts: { nextSiteId?: string | null; wantsConfirm?: boolean } = {},
 ): Promise<
-  { purpose: string | null; previous: RecipientPair; recipient: RecipientPair } | undefined
+  | {
+      purpose: string | null;
+      fromDirectory: boolean;
+      previous: RecipientPair;
+      recipient: RecipientPair;
+    }
+  | undefined
 > {
   const [row] = await tx
     .select({
       contractorId: deliveries.contractorId,
       recipientMolId: deliveries.recipientMolId,
+      siteId: deliveries.siteId,
       purpose: deliveries.purpose,
+      purposeFromDirectory: deliveries.purposeFromDirectory,
+      confirmedByMolAt: deliveries.confirmedByMolAt,
       recipientsPerDocument: deliveries.recipientsPerDocument,
     })
     .from(deliveries)
@@ -191,15 +283,30 @@ export async function lockPurposeForRecipientWrite(
     throw new PurposeConflictsRecipientError();
   }
   const cur = currentPurpose(row.purpose);
-  if ('raw' in cur && chosenPurpose === undefined) return { purpose: cur.raw, previous, recipient };
+  if ('raw' in cur && chosenPurpose === undefined) {
+    return { purpose: cur.raw, fromDirectory: row.purposeFromDirectory, previous, recipient };
+  }
   const previousPurpose = 'raw' in cur ? null : cur.known;
-  const nextPurpose =
-    chosenPurpose ??
-    reconcileDeliveryPurpose(
-      deliveryRecipientKind(previous),
-      deliveryRecipientKind(recipient),
-      previousPurpose,
-    );
+  const nextSiteId = opts.nextSiteId === undefined ? row.siteId : opts.nextSiteId;
+  const decided = await decidePurpose(
+    tx,
+    {
+      prevKind: deliveryRecipientKind(previous),
+      nextKind: deliveryRecipientKind(recipient),
+      purpose: previousPurpose,
+      fromDirectory: row.purposeFromDirectory,
+      chosen: chosenPurpose,
+      insert: false,
+      pairChanged:
+        previous.contractorId !== recipient.contractorId ||
+        previous.recipientMolId !== recipient.recipientMolId ||
+        nextSiteId !== row.siteId,
+      firstConfirm: opts.wantsConfirm === true && row.confirmedByMolAt === null,
+      directoryAllowed: !row.recipientsPerDocument,
+    },
+    { contractorId: recipient.contractorId, siteId: nextSiteId },
+  );
+  const nextPurpose = decided.purpose;
   if (row.recipientsPerDocument) {
     await reconcileLinkedDocumentPurposes(
       tx,
@@ -208,5 +315,5 @@ export async function lockPurposeForRecipientWrite(
       { ...recipient, purpose: nextPurpose },
     );
   }
-  return { purpose: nextPurpose, previous, recipient };
+  return { purpose: nextPurpose, fromDirectory: decided.fromDirectory, previous, recipient };
 }

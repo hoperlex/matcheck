@@ -25,6 +25,7 @@ import { assertPermission } from '../lib/permissions/assert.js';
 import { publishEvent } from './events.js';
 import { resetDocumentContracts } from '../domain/supplier-contracts/delivery-contract.js';
 import {
+  detachDirectoryPurpose,
   documentStateOf,
   lockFreeEdoMatches,
   lockPurposeForRecipientWrite,
@@ -70,6 +71,7 @@ type LockedDelivery = Pick<
   | 'contractorId'
   | 'recipientMolId'
   | 'purpose'
+  | 'purposeFromDirectory'
 >;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -83,6 +85,7 @@ async function lockDelivery(tx: any, id: string): Promise<LockedDelivery | undef
       contractorId: deliveries.contractorId,
       recipientMolId: deliveries.recipientMolId,
       purpose: deliveries.purpose,
+      purposeFromDirectory: deliveries.purposeFromDirectory,
     })
     .from(deliveries)
     .where(eq(deliveries.id, id))
@@ -233,7 +236,15 @@ export function registerDeliveryDocumentRecipientRoutes(
             : 'contractorId' in body
               ? { ...before, ownRecipient: true, contractorId: body.contractorId, recipientMolId: null }
               : { ...before, ownRecipient: true, contractorId: null, recipientMolId: body.recipientMolId };
-      await doc.write(reconcileDocumentPurpose(general(locked), general(locked), before, next));
+      // Общий признак поставил справочник для получателя шапки — документу
+      // с другим получателем он не подходит (detachDirectoryPurpose).
+      await doc.write(
+        detachDirectoryPurpose(
+          general(locked),
+          locked.purposeFromDirectory,
+          reconcileDocumentPurpose(general(locked), general(locked), before, next),
+        ),
+      );
       return { code: 200 as const, id: locked.id, siteId: locked.siteId };
     });
   }
@@ -301,7 +312,10 @@ export function registerDeliveryDocumentRecipientRoutes(
           .update(deliveries)
           .set({
             ...next,
-            ...(reconciled && { purpose: reconciled.purpose }),
+            ...(reconciled && {
+              purpose: reconciled.purpose,
+              purposeFromDirectory: reconciled.fromDirectory,
+            }),
             updatedAt: new Date(),
           })
           .where(eq(deliveries.id, row.id));

@@ -50,6 +50,11 @@ export async function syncPairedTransferDelivery(
   if (!existing) {
     // Первичное создание: статус not_filled, позиции — копия из shipment.
     const statusId = await resolveStatusId(app, 'delivery', 'not_filled');
+    const initialPurpose = await purposeOnInsert(
+      app.db,
+      { contractorId: sh.receiverCounterpartyId, recipientMolId: sh.receiverMolId },
+      sh.destSiteId,
+    );
     const [created] = await app.db
       .insert(deliveries)
       .values({
@@ -58,10 +63,8 @@ export async function syncPairedTransferDelivery(
         supplierId: null,
         contractorId: sh.receiverCounterpartyId,
         recipientMolId: sh.receiverMolId,
-        purpose: purposeOnInsert({
-          contractorId: sh.receiverCounterpartyId,
-          recipientMolId: sh.receiverMolId,
-        }),
+        purpose: initialPurpose.purpose,
+        purposeFromDirectory: initialPurpose.fromDirectory,
         sourceShipmentId: sh.id,
         vehiclePlate: sh.vehiclePlate,
         driverName: sh.driverName,
@@ -121,7 +124,10 @@ export async function syncPairedTransferDelivery(
       .update(deliveries)
       .set({
         ...next,
-        ...(reconciled && { purpose: reconciled.purpose }),
+        ...(reconciled && {
+          purpose: reconciled.purpose,
+          purposeFromDirectory: reconciled.fromDirectory,
+        }),
         vehiclePlate: sh.vehiclePlate,
         driverName: sh.driverName,
         updatedAt: new Date(),

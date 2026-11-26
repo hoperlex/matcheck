@@ -147,6 +147,12 @@ import {
   DELIVERY_PURPOSE_LABELS,
   DELIVERY_PURPOSE_OPTIONS,
 } from '../../shared/utils/deliveryPurpose';
+import {
+  PurposeDirectoryMark,
+  purposeButtonColor,
+  purposeDirectoryState,
+  purposeMenuLabel,
+} from './purposeDirectoryHint';
 
 type DraftItem = {
   clientKey: string;
@@ -2693,30 +2699,54 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                         )
                       : (loadedDelivery.purpose ?? null));
                   const allowed = allowedDeliveryPurposes(deliveryRecipientKind(formRecipient));
+                  // Справочник «Объекты и вид»: подсказка относится к СОХРАНЁННОЙ паре
+                  // подрядчик × объект — пока получатель или объект формы не
+                  // сохранены, её не показываем (сервер пересчитает при записи).
+                  const siteDirty = siteId !== null && siteId !== loadedDelivery.siteId;
+                  const hint = recipientDirty || siteDirty ? null : loadedDelivery.purposeHint;
+                  const dirState = purposeDirectoryState(
+                    hint,
+                    shown,
+                    pendingPurpose === null && loadedDelivery.purposeFromDirectory === true,
+                  );
+                  const dirColor = purposeButtonColor(hint, dirState);
                   const button = (
-                    <Button size="small" loading={patchPurpose.isPending} disabled={purposeLocked}>
+                    <Button
+                      size="small"
+                      loading={patchPurpose.isPending}
+                      disabled={purposeLocked}
+                      {...(dirColor && { color: dirColor, variant: 'outlined' as const })}
+                    >
                       Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:{' '}
                       {shown ? DELIVERY_PURPOSE_LABELS[shown] : '—'} <DownOutlined />
                     </Button>
                   );
                   return (
-                    <Dropdown
-                      menu={{
-                        items: DELIVERY_PURPOSE_OPTIONS.filter((o) => allowed.includes(o.key)),
-                        selectedKeys: shown ? [shown] : [],
-                        onClick: ({ key }) => {
-                          if (isNew || recipientDirty || pendingPurpose !== null) {
-                            setPendingPurpose(key as DeliveryPurpose);
-                          } else {
-                            patchPurpose.mutate(key as DeliveryPurpose);
-                          }
-                        },
-                      }}
-                      disabled={purposeLocked}
-                      trigger={['click']}
-                    >
-                      {button}
-                    </Dropdown>
+                    <>
+                      <Dropdown
+                        menu={{
+                          items: DELIVERY_PURPOSE_OPTIONS.filter((o) =>
+                            allowed.includes(o.key),
+                          ).map((o) => ({
+                            key: o.key,
+                            label: purposeMenuLabel(o.key, o.label, hint),
+                          })),
+                          selectedKeys: shown ? [shown] : [],
+                          onClick: ({ key }) => {
+                            if (isNew || recipientDirty || pendingPurpose !== null) {
+                              setPendingPurpose(key as DeliveryPurpose);
+                            } else {
+                              patchPurpose.mutate(key as DeliveryPurpose);
+                            }
+                          },
+                        }}
+                        disabled={purposeLocked}
+                        trigger={['click']}
+                      >
+                        {button}
+                      </Dropdown>
+                      <PurposeDirectoryMark hint={hint} state={dirState} />
+                    </>
                   );
                 })()}
               {!canChoosePurpose && loadedDelivery.purpose && (
@@ -2724,6 +2754,16 @@ export default function KppPage({ embedded = false }: { embedded?: boolean }) {
                   Признак{loadedDelivery.recipientsPerDocument ? ' (общий)' : ''}:{' '}
                   {DELIVERY_PURPOSE_LABELS[loadedDelivery.purpose]}
                 </Tag>
+              )}
+              {!canChoosePurpose && loadedDelivery.purpose && (
+                <PurposeDirectoryMark
+                  hint={loadedDelivery.purposeHint}
+                  state={purposeDirectoryState(
+                    loadedDelivery.purposeHint,
+                    loadedDelivery.purpose,
+                    loadedDelivery.purposeFromDirectory === true,
+                  )}
+                />
               )}
             </Space>
           );

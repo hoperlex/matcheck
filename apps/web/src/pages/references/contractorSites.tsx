@@ -215,7 +215,13 @@ export function ContractorSitesFormList({
                     style={{ width: 210, marginBottom: 0 }}
                     rules={[{ required: true, message: 'Выберите вид' }]}
                   >
-                    <Select placeholder="Вид" options={KIND_OPTIONS} aria-label="Вид" />
+                    <Select
+                      placeholder="Вид"
+                      options={KIND_OPTIONS}
+                      aria-label="Вид"
+                      // «Реализация + давальческий» шире поля — список не обрезает подпись.
+                      popupMatchSelectWidth={false}
+                    />
                   </Form.Item>
                   <Button
                     icon={<DeleteOutlined />}
